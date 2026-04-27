@@ -40,6 +40,9 @@ from aws_cdk import (
 from aws_cdk import (
     aws_s3_deployment as s3deploy,
 )
+from aws_cdk import (
+    custom_resources as cr,
+)
 from cdk_nag import NagSuppressions
 from constructs import Construct
 
@@ -261,15 +264,104 @@ class HelloWorldFrontendStack(Stack):
             name=rum_monitor_name,
             domain=distribution.distribution_domain_name,
             cw_log_enabled=True,
+            # Enable custom events so the frontend can call cwr('recordEvent', ...)
+            # for domain telemetry. Without this set to ENABLED, custom event
+            # uploads are silently dropped at the data plane.
+            custom_events=rum.CfnAppMonitor.CustomEventsProperty(status="ENABLED"),
             app_monitor_configuration=rum.CfnAppMonitor.AppMonitorConfigurationProperty(
                 allow_cookies=True,
                 enable_x_ray=True,
                 session_sample_rate=1.0,
-                telemetries=["errors", "performance", "http"],
+                telemetries=["errors", "performance", "http", "interaction"],
                 identity_pool_id=rum_identity_pool.ref,
                 guest_role_arn=rum_unauth_role.role_arn,
             ),
         )
+
+        # ── RUM extended metrics ─────────────────────────────────────────────
+        # By default RUM publishes scalar CloudWatch metrics (JsErrorCount,
+        # Http4xxCount, etc.) with only the application_name dimension. Extended
+        # metrics add user-agent / geo / page dimensions so dashboards can slice
+        # by browser, device, country, or page. There is no native CloudFormation
+        # resource for RUM metrics destinations or definitions — both are managed
+        # via API only — so we wire them in with AwsCustomResource. When the
+        # AppMonitor is destroyed, RUM cascade-deletes its metric configuration,
+        # so on_delete is wired only for the destination (to support switching
+        # destinations on a live monitor without an orphan).
+        #
+        # NOTE: BatchCreateRumMetricDefinitions creates new definitions; it is
+        # not idempotent on re-call. Changing the metric list below requires a
+        # destroy + redeploy of the stack so the AppMonitor cascade-cleanup runs
+        # before the new set is created.
+        rum_metrics_destination = cr.AwsCustomResource(
+            self,
+            "RumMetricsDestination",
+            on_create=cr.AwsSdkCall(
+                service="rum",
+                action="putRumMetricsDestination",
+                parameters={
+                    "AppMonitor": rum_monitor_name,
+                    "Destination": "CloudWatch",
+                },
+                physical_resource_id=cr.PhysicalResourceId.of(f"{rum_monitor_name}/CloudWatch"),
+            ),
+            on_delete=cr.AwsSdkCall(
+                service="rum",
+                action="deleteRumMetricsDestination",
+                parameters={
+                    "AppMonitor": rum_monitor_name,
+                    "Destination": "CloudWatch",
+                },
+            ),
+            policy=cr.AwsCustomResourcePolicy.from_statements(
+                [
+                    iam.PolicyStatement(
+                        actions=[
+                            "rum:PutRumMetricsDestination",
+                            "rum:DeleteRumMetricsDestination",
+                        ],
+                        resources=[rum_monitor_arn],
+                    ),
+                ]
+            ),
+        )
+        rum_metrics_destination.node.add_dependency(rum_app_monitor)
+
+        extended_metric_definitions: list[dict[str, Any]] = [
+            # JS error breakdown — slice errors by who's hitting them
+            {"Name": "JsErrorCount", "DimensionKeys": {"metadata.browserName": "BrowserName"}},
+            {"Name": "JsErrorCount", "DimensionKeys": {"metadata.deviceType": "DeviceType"}},
+            {"Name": "JsErrorCount", "DimensionKeys": {"metadata.countryCode": "CountryCode"}},
+            # HTTP error breakdown by browser
+            {"Name": "Http4xxCount", "DimensionKeys": {"metadata.browserName": "BrowserName"}},
+            {"Name": "Http5xxCount", "DimensionKeys": {"metadata.browserName": "BrowserName"}},
+            # Per-page navigation timing and view counts
+            {"Name": "PerformanceNavigationDuration", "DimensionKeys": {"metadata.pageId": "PageId"}},
+            {"Name": "PageViewCount", "DimensionKeys": {"metadata.pageId": "PageId"}},
+        ]
+        rum_extended_metrics = cr.AwsCustomResource(
+            self,
+            "RumExtendedMetrics",
+            on_create=cr.AwsSdkCall(
+                service="rum",
+                action="batchCreateRumMetricDefinitions",
+                parameters={
+                    "AppMonitorName": rum_monitor_name,
+                    "Destination": "CloudWatch",
+                    "MetricDefinitions": extended_metric_definitions,
+                },
+                physical_resource_id=cr.PhysicalResourceId.of(f"{rum_monitor_name}/extended-metrics"),
+            ),
+            policy=cr.AwsCustomResourcePolicy.from_statements(
+                [
+                    iam.PolicyStatement(
+                        actions=["rum:BatchCreateRumMetricDefinitions"],
+                        resources=[rum_monitor_arn],
+                    ),
+                ]
+            ),
+        )
+        rum_extended_metrics.node.add_dependency(rum_metrics_destination)
 
         # ── Deploy frontend assets ───────────────────────────────────────────
         # Uploads frontend/ to S3 and generates config.json with the API URL
@@ -289,6 +381,14 @@ class HelloWorldFrontendStack(Stack):
                             "appMonitorId": rum_app_monitor.attr_id,
                             "identityPoolId": rum_identity_pool.ref,
                             "region": self.region,
+                            # Session attributes are attached to every RUM event
+                            # in the session. Sourcing them from deploy-time
+                            # config (rather than hardcoding in the HTML) lets
+                            # multiple deploys feed the same dashboard while
+                            # remaining filterable.
+                            "sessionAttributes": {
+                                "applicationName": self.stack_name,
+                            },
                         },
                     },
                 ),
@@ -397,11 +497,14 @@ class HelloWorldFrontendStack(Stack):
         #   Custom::CDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756C — BucketDeployment provider
         #   Custom::S3AutoDeleteObjectsCustomResourceProvider — auto-delete provider
         #   LogRetentionaae0aa3c5b4d4f87b02d85b201efdd8a — log retention singleton
+        #   AWS679f53fac002430cb0da5b7982bd2287 — AwsCustomResource provider Lambda
+        #     (used by RumMetricsDestination + RumExtendedMetrics)
         suppress_cdk_singletons(
             self,
             (
                 "Custom::CDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756C",
                 "LogRetentionaae0aa3c5b4d4f87b02d85b201efdd8a",
+                "AWS679f53fac002430cb0da5b7982bd2287",
             ),
         )
 

@@ -126,7 +126,7 @@ Resources are split across three stacks. All resources in all stacks have `Remov
 | Glue Table (`s3_access_logs`) | 26-field regex-parsed schema for S3 server access logs |
 | Athena WorkGroup | Query execution config with SSE-S3 encrypted results, CloudWatch metrics enabled |
 | Athena Named Queries (5 CloudFront + 6 S3) | Pre-built SQL queries: top URIs, errors, top IPs, bandwidth by edge, cache hit ratio, top operations, error requests, top requesters, slow requests, access denied (403), object read audit |
-| CloudWatch RUM AppMonitor | Real User Monitoring for the browser — page loads, JS errors, Core Web Vitals, fetch timings, with X-Ray correlation |
+| CloudWatch RUM AppMonitor | Real User Monitoring for the browser — page loads, JS errors, Core Web Vitals, fetch timings, user interactions, with X-Ray correlation |
 | Cognito Identity Pool | Unauthenticated identity pool issuing guest credentials to the browser RUM client |
 | IAM Role (RUM guest) | Assumed by the identity pool; scoped to `rum:PutRumEvents` on this app monitor only |
 
@@ -1018,11 +1018,26 @@ Every layer of the stack emits structured logs and/or traces:
 | **CloudFront** | S3 (`cloudfront/` prefix) | AWS fixed 33-field tab-delimited format — client IP, URI, status, edge location, etc. | N/A (traces propagate from API Gateway → Lambda) |
 | **S3** | S3 (`s3-access-logs/` prefix) | AWS fixed ~25-field space-delimited format — requester, operation, key, status, bytes | N/A |
 | **WAF** | CloudWatch Logs (`aws-waf-logs-*`) | AWS JSON — action, rule matched, request headers, country, URI | N/A |
-| **Browser (RUM)** | CloudWatch RUM + CloudWatch Logs | AWS JSON — page loads, JS errors, Core Web Vitals, fetch timings, session/user IDs | Client-side segment joins the backend trace via `X-Amzn-Trace-Id` |
+| **Browser (RUM)** | CloudWatch RUM + CloudWatch Logs | AWS JSON — page loads, JS errors, Core Web Vitals, fetch timings, user interactions, session/user IDs | Client-side segment joins the backend trace via `X-Amzn-Trace-Id` |
 
 X-Ray traces flow end-to-end: the browser RUM client emits a client-side segment and attaches an `X-Amzn-Trace-Id` header to outbound fetches, API Gateway continues that trace, Lambda adds subsegments (via Powertools Tracer `@tracer.capture_method`), and the `xrayTraceId` is included in API Gateway access logs for correlation. S3 and CloudFront access logs use AWS-fixed formats that are not customizable.
 
 **CloudWatch RUM.** The frontend stack provisions an `AWS::RUM::AppMonitor` with `EnableXRay=true`. The app monitor ID, identity pool ID, and region are injected into `frontend/config.json` at deploy time; the HTML loads the RUM snippet from `<head>`, initializes `cwr` with `enableXRay: true`, and the single X-Ray trace shows browser → CloudFront → API Gateway → Lambda in one timeline. API Gateway CORS is configured to allow the `X-Amzn-Trace-Id` request header so the browser's trace ID propagates through the preflight.
+
+The `telemetries` list (set identically on the AppMonitor and in the client snippet) enables four plugins: `errors` (uncaught JS exceptions and unhandled promise rejections via `window.onerror`), `performance` (page load timings, Core Web Vitals), `http` (`fetch`/`XHR` latency and status), and `interaction` (user click events). The `errors` telemetry only catches *uncaught* exceptions — caught errors are invisible to RUM unless explicitly recorded, so the API-call handler in [frontend/index.html](frontend/index.html) calls `window.cwr("recordError", err)` from its `catch` block to surface API failures that the page swallows into an inline message.
+
+The `http` telemetry is written as a `[name, config]` tuple — `["http", { addXRayTraceIdHeader: true }]` — rather than the bare-string form. `enableXRay: true` defaults `addXRayTraceIdHeader` to true today, but stating it explicitly guards against future client-version regressions of that default and matches the AWS reference snippet pattern.
+
+**Custom events.** The AppMonitor sets `CustomEvents.Status: ENABLED` so the frontend can call `cwr('recordEvent', type, details)` for domain telemetry beyond what the standard plugins capture. Without that flag, custom event uploads are silently dropped at the data plane. No event types are recorded today; the wiring is in place for when the application gains business-meaningful interactions.
+
+**Session attributes.** Deploy-time metadata is attached to every RUM event in the session via `sessionAttributes`. The frontend stack injects `applicationName: <stack-name>` into `frontend/config.json`, and the client snippet reads it into the `cwr` config. Sourcing attributes from the deployed config (rather than hardcoding in the HTML) lets multiple deploys feed the same dashboard while remaining filterable. Attribute limits: max 10 per event, key ≤128 chars (alphanumeric, `:`, `_`, no `aws:` prefix, no reserved keys like `browserName`/`pageTitle`/`version`), value ≤256 chars (string/number/boolean).
+
+**Extended metrics.** By default, RUM publishes scalar CloudWatch metrics (`JsErrorCount`, `Http4xxCount`, `PageViewCount`, `PerformanceNavigationDuration`, etc.) with only the `application_name` dimension — useful for top-line counts but blind to *which* browser, device, country, or page is producing them. Extended metrics add user-agent / geo / page dimensions to those scalars so dashboards can slice the same metric multiple ways. The frontend stack registers a CloudWatch destination on the AppMonitor and creates seven extended metric definitions covering JS errors (by browser / device / country), HTTP errors (by browser), and per-page navigation timing and view counts.
+
+There is no native CloudFormation resource for RUM metric destinations or definitions — both are managed via the RUM API only — so the stack uses two `AwsCustomResource` constructs to call `PutRumMetricsDestination` and `BatchCreateRumMetricDefinitions` at deploy time. Two operational notes:
+
+- **Updates require destroy + redeploy.** `BatchCreateRumMetricDefinitions` creates new definitions and is not idempotent on re-call; if you change the metric list in the stack code, the existing AppMonitor must be destroyed (which cascade-deletes its metric configuration) before a new deploy registers the new set. Otherwise the old and new definitions accumulate.
+- **No alarms are wired.** Recording the metrics with dimensions is enough to enable ad-hoc CloudWatch metric queries and dashboard widgets sliced by the new dimensions; binding specific thresholds to alarms is a separate decision left to the operator.
 
 **Why Cognito.** Browsers are anonymous — they have no prior identity and nowhere to safely store long-lived AWS credentials — but the RUM data plane still needs authenticated SigV4 calls to `rum:PutRumEvents`. A Cognito Identity Pool with `AllowUnauthenticatedIdentities=true` is the AWS-standard bridge: it issues short-lived STS credentials to every anonymous browser session, which the RUM client then uses to sign telemetry uploads. This is what makes client-side telemetry possible without shipping an access key to the browser. The trust chain is:
 

@@ -91,9 +91,18 @@
             sessionSampleRate: 1,
             identityPoolId: cfg.rum.identityPoolId,
             endpoint: "https://dataplane.rum." + cfg.rum.region + ".amazonaws.com",
-            telemetries: ["performance", "errors", "http"],
+            // The http telemetry is written as a [name, config] tuple so
+            // addXRayTraceIdHeader is set explicitly. enableXRay: true defaults
+            // it to true today, but stating it explicitly guards against future
+            // client-version regressions of that default and matches the AWS
+            // reference snippet pattern.
+            telemetries: ["performance", "errors", ["http", { addXRayTraceIdHeader: true }], "interaction"],
             allowCookies: true,
             enableXRay: true,
+            // Session attributes are deploy-time injected via config.json so
+            // multiple deploys can feed the same monitor while remaining
+            // filterable in the dashboard.
+            sessionAttributes: cfg.rum.sessionAttributes || {},
           }
         );
       }).catch(function () { /* config missing — skip RUM init */ });
@@ -134,6 +143,10 @@
       } catch (err) {
         response.textContent = `Error: ${err.message}`;
         response.className   = "response error";
+        // Caught errors aren't picked up by the RUM "errors" telemetry
+        // (which hooks window.onerror / unhandledrejection), so record
+        // them explicitly so they still surface in the RUM dashboard.
+        if (window.cwr) window.cwr("recordError", err);
       } finally {
         btn.disabled          = false;
         spinner.style.display = "none";
