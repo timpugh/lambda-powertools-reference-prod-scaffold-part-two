@@ -210,6 +210,27 @@ The workspace declares four folder roots — `.` (CDK + `.venv`), `lambda/` (`.v
 
 Note: [VS Code's `python-envs.pythonProjects` feature](https://code.visualstudio.com/docs/python/environments#_python-projects) would cover terminal activation and the test runner per folder inside a single workspace, but it assumes each project's venv lives under its folder. This repo keeps both venvs at the repo root (matching uv's layout and the `UV_PROJECT_ENVIRONMENT` switch the Makefile uses), so per-folder `python.defaultInterpreterPath` inside a multi-root workspace is the right fit. Pylance is single-interpreter per workspace anyway, so the multi-root workspace is the only way to get correct type resolution for both sides.
 
+**Environment discovery (`python-envs.workspaceSearchPaths`).** The new Python Environments extension (`ms-python.vscode-python-envs`, recommended) defaults its search to `./**/.venv`, which only matches the literal name `.venv` and would miss `.venv-lambda`. `.vscode/settings.json` pins the search to both paths explicitly so the *Python: Select Interpreter* picker lists both venvs out of the box. If you add a third venv at a non-default path, append it to the array.
+
+**Optional user setting: `python-envs.alwaysUseUv`.** VS Code scopes this setting to *user* only, so it can't be committed to the repo. If you set it to `true` in your User Settings, the extension creates new envs with `uv venv` instead of `python -m venv`. Worth turning on for this project — the Makefile already uses `uv lock`/`uv export`/`uv sync`, and uv is listed as a prerequisite.
+
+**Debug configurations (`.vscode/launch.json`).** Three F5 configs are pre-wired:
+
+- **Python: Current File** — generic debugpy launch on whatever `.py` file is focused.
+- **Pytest: Current File** — runs `pytest ${file} -v --override-ini=addopts=` under the debugger. The `--override-ini=addopts=` flag clears the global pytest options from `pyproject.toml` (`-n auto`, `--cov-fail-under=100`, the HTML reporter), which would otherwise either fight the debugger or fail single-test runs on the coverage threshold. The same flag is also tagged with `"purpose": ["debug-test"]`, so VS Code's Test Explorer uses this configuration when you click the debug-icon next to a test instead of running its own uncustomized debugpy invocation.
+- **CDK: Synth (app.py)** — runs the root `app.py` (the CDK entry point) under debugpy with the same dummy-account env vars the `cdk-check` CI job uses. Useful when synth blows up and you need to step through stack construction in [hello_world/](hello_world/) — set a breakpoint in any `*_stack.py`, hit F5, and walk the stack assembly.
+
+The three `aws-sam` configs in the same file come from the AWS Toolkit extension and contain placeholder strings (`"Template Location"`, `"Function Logical ID"`, etc.) — they're inert until filled in for SAM-based local Lambda invocation, which this project doesn't use. Either fill them in if you start using SAM locally, or ignore them.
+
+**Test Explorer.** Pylance fixture inlay hints are on (`python.analysis.inlayHints.pytestParameters: true`) — the inferred type for each fixture parameter renders inline at test-function definitions, which makes the indirection in [tests/conftest.py](tests/conftest.py) easier to follow without a hover. The Test Explorer's *Run Tests with Coverage* toolbar button works out of the box because `pytest-cov` is already a dev dependency: it produces per-line gutter decorations for the file under test, scoped to that single run (independent of `make test`'s 100% threshold gate). Note that VS Code's docs flag a known issue where `pytest-cov` suppresses breakpoints when debugging — the Pytest debug config above already dodges this via `--override-ini=addopts=`, which strips `--cov` along with `-n auto`.
+
+**Pylance defaults.** A few Pylance settings are on by default in `.vscode/settings.json` to make the editor signal closer to what the linters enforce:
+
+- `python.analysis.typeCheckingMode: "strict"` — full Pylance type analysis inline. This overlaps with the mypy linter that runs on save and in CI, but the two are *separate engines with separate rule sets* — they share the goal of type checking but disagree on the specifics. Pylance is stricter on `Any`, more aggressive on inferred narrowing, and will surface problems that mypy lets pass (and vice versa). Expect a wave of new entries in the *Problems* panel after enabling this for the first time; triage with `python.analysis.diagnosticSeverityOverrides` if specific rules get too loud. If you'd rather only see mypy's view of the world, lower this to `"basic"` or `"off"` in your User Settings — the workspace value still wins, so override at folder/user scope rather than editing the committed file.
+- `python.analysis.autoImportCompletions: true` — completing an unknown symbol offers to add the matching `import` line.
+- `python.analysis.autoFormatStrings: true` — typing `{` inside a regular string auto-prefixes the literal with `f` so it becomes an f-string.
+- `python.analysis.inlayHints.{variableTypes,functionReturnTypes,callArgumentNames}` — inline annotations for inferred local-variable types, function return types, and named-argument hints at call sites. `callArgumentNames` is set to `"all"` (the most verbose option); switch to `"partial"` in User Settings if it's too dense at call sites with many args.
+
 ## Deploy the application
 
 This project needs a container runtime for bundling Lambda dependencies during synthesis. Either [Finch](https://runfinch.com/) or [Docker](https://www.docker.com/) works — CDK uses whichever runtime is pointed to by the `CDK_DOCKER` environment variable, and falls back to Docker when the variable is unset (see the [CDK GitHub issue](https://github.com/aws/aws-cdk/issues/23680#issuecomment-1741643237) where Finch support was added). Pick one:
@@ -656,6 +677,16 @@ pre-commit run --all-files
 | `pip-audit` | local | Scans all installed dependencies for known CVEs (runs on every commit) |
 
 **Version pinning.** The `ruff` and `mypy` hooks are pinned to specific versions in `.pre-commit-config.yaml` (`rev:` for ruff, `additional_dependencies:` for mypy's `boto3-stubs` and `aws-cdk-lib`). These pins must stay in sync with the corresponding versions resolved in `uv.lock` — if Dependabot bumps ruff or boto3-stubs in the lock, update `.pre-commit-config.yaml` to match. A version mismatch means pre-commit and the local venv would run different tool versions, which can cause "passes locally, fails in CI" drift.
+
+**Optional: aligning VS Code editor lint output with CI.** The same drift class can appear at a third surface: the Microsoft Pylint and Mypy extensions and the Astral Ruff extension all default to `importStrategy: "useBundled"`, which runs the tool binary that ships *inside the extension* rather than the one resolved in `uv.lock`. The bundled versions can be ahead, behind, or differ on rule defaults from the pins in `pyproject.toml` (currently `ruff==0.15.10`, `mypy==1.20.0`, `pylint==4.0.5`), so it's possible to see a clean editor while CI fails on a rule that exists in the pinned version. To make the editor use the exact same binaries as pre-commit and CI, add the following to your **personal** VS Code settings (User Settings, not the committed `.vscode/settings.json`):
+
+```json
+"ruff.importStrategy": "fromEnvironment",
+"mypy-type-checker.importStrategy": "fromEnvironment",
+"pylint.importStrategy": "fromEnvironment"
+```
+
+This points each extension at the active interpreter's `.venv/bin/`, where the `lint` dependency group installs the pinned binaries. The setting is intentionally *not* added to the committed workspace settings: a contributor who opens the repo before running `uv sync --group lint` would have empty `.venv/bin/` paths, and `fromEnvironment` would either silently fall back to bundled or surface a confusing error depending on the extension. Keeping the workspace default at `useBundled` means the editor "just works" out of the box; opt-in to `fromEnvironment` once you've synced the lint group locally.
 
 ## GitHub Actions
 
