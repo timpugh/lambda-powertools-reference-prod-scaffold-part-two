@@ -51,7 +51,10 @@ repos:
         pass_filenames: false
       - id: pip-audit
         name: pip-audit vulnerability scan
-        entry: pip-audit
+        # CVE-2026-3219 affects pip 26.0.1 (the version uv ships into the
+        # build env) and has no upstream fix as of 2026-04. Ignoring it
+        # unblocks every PR; revisit this list when pip publishes a fix.
+        entry: pip-audit --ignore-vuln CVE-2026-3219
         language: system
         pass_filenames: false
         always_run: true

@@ -38,13 +38,21 @@ jobs:
       # API breaks (aws-cdk synthesis changes, aws-lambda-powertools middleware
       # rewrites, boto deprecated method removals).
       #
-      # For uv updates that touch the lambda runtime group (boto*, aws-lambda-
+      # Both `uv` and `pip` ecosystem values match — Dependabot's `uv`
+      # ecosystem reports `package-ecosystem: pip` in fetch-metadata output
+      # because uv builds on pip's resolver, so the metadata action sees the
+      # underlying tool rather than the configured ecosystem. Accept either
+      # so PRs from this repo's uv config (which file under dependabot/pip/*
+      # head refs) are auto-merged the same as a hypothetical pip config.
+      #
+      # For updates that touch the lambda runtime group (boto*, aws-lambda-
       # powertools, etc.), CI's drift check on lambda/requirements.txt will
       # fail and the PR will sit with auto-merge armed. Run `make lock` locally
       # on the PR branch and push — CI re-runs, passes, and GitHub merges.
-      - name: Approve and auto-merge patch/minor uv updates
+      - name: Approve and auto-merge patch/minor Python (uv/pip) updates
         if: |
-          steps.metadata.outputs.package-ecosystem == 'uv' &&
+          (steps.metadata.outputs.package-ecosystem == 'uv' ||
+           steps.metadata.outputs.package-ecosystem == 'pip') &&
           (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
            steps.metadata.outputs.update-type == 'version-update:semver-minor')
         run: |
