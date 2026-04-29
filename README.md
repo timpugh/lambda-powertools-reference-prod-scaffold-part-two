@@ -868,6 +868,56 @@ cdk-nag ships one additional pack that is not enabled in this project. It can be
 
 Full rule documentation: [github.com/cdklabs/cdk-nag/blob/main/RULES.md](https://github.com/cdklabs/cdk-nag/blob/main/RULES.md)
 
+### Why cdk-nag and not cfn-guard or Checkov
+
+cdk-nag is the most actively maintained CDK-native compliance gate and the only serious entrant in its category. Two adjacent tools come up in conversation, and both are deliberately *not* layered on top here:
+
+| Tool | Architecture | Rule language | Suppression UX |
+|------|--------------|---------------|----------------|
+| **cdk-nag** (in use) | CDK Aspects, walks the construct tree at synth time | TypeScript / Python rules shipped in the cdk-nag package | Native CDK API — `NagSuppressions.add_resource_suppressions(...)` with reason strings, per-resource or stack-level, supports `apply_to_children=True` |
+| **[cdk-validator-cfnguard](https://github.com/cdklabs/cdk-validator-cfnguard)** | `PolicyValidationPluginBeta1` plugin, runs the [cfn-guard](https://github.com/aws-cloudformation/cloudformation-guard) binary against the synthesized CFN JSON | [Guard DSL](https://github.com/aws-cloudformation/aws-guard-rules-registry) (declarative `.guard` files) | CFN template metadata (`Metadata.guard.SuppressedRules`) or CLI skip flags — no CDK-aware ergonomics |
+| **[cdk-validator-checkov](https://github.com/cdklabs/cdk-validator-checkov)** | Same plugin pattern, wraps [Checkov](https://github.com/bridgecrewio/checkov) | Python rules (Checkov's 1,000+ rule database across many cloud providers) | Comments in synthesized JSON or CLI flags — same ergonomic gap as cfn-guard |
+
+The two plugin wrappers are *architecturally newer* (the `PolicyValidationPluginBeta1` framework post-dates cdk-nag's Aspects pattern) but they're a different category: they bolt CFN-template scanners onto CDK after synthesis. They lose the CDK-aware view (construct tree, parent/child relationships, pre-synth attributes), and they introduce a second suppression model that doesn't compose with the cdk-nag suppressions already in this repo. The compliance content also overlaps heavily — NIST 800-53 R5, HIPAA Security, and PCI DSS 3.2.1 are all available in both ecosystems.
+
+**When adding a plugin wrapper would make sense (not the case here):**
+
+- You want one of the [aws-guard-rules-registry](https://github.com/aws-cloudformation/aws-guard-rules-registry) packs that cdk-nag doesn't ship (see below) — Control Tower Detective Guardrails, FedRAMP Moderate/High, CIS AWS Foundations Benchmark, ABS CCIG, Bank of Canada CCB, AWS Well-Architected, plus AWS Config-rule conversions.
+- Your security team already authors policies in Guard DSL and you want the same `.guard` files enforced across CDK / SAM / Terraform-converted-to-CFN pipelines.
+- You're validating CloudFormation generated *outside* CDK and want one tool for everything.
+
+#### What's in `aws-guard-rules-registry`
+
+The registry is AWS's open-source library of cfn-guard rule packs covering compliance frameworks, AWS service guardrails, and mass conversions of AWS Config managed rules into Guard DSL. The breadth is its main differentiator over cdk-nag — Config alone has hundreds of managed rules, all converted and grouped here. The downside is that mechanically-translated rules are noisier than hand-written equivalents, and the suppression model is template metadata rather than CDK-native API calls.
+
+Notable rule packs (not exhaustive):
+
+| Pack | Focus | cdk-nag overlap |
+|------|-------|-----------------|
+| **Control Tower Detective Guardrails** | The Detective Guardrails published by AWS Control Tower (root account, IAM, encryption, logging) | Partial — overlaps `AwsSolutionsChecks` on the IAM/encryption side; the Control Tower-specific account-level rules have no cdk-nag equivalent |
+| **FedRAMP Moderate** | NIST 800-53 R4 controls applicable to FedRAMP Moderate baseline | High — most rules are NIST 800-53 R4/R5 controls already covered by cdk-nag's `NIST80053R5Checks` (FedRAMP Moderate is essentially a NIST R4 subset with FedRAMP-specific procedural overlay; the R5 pack covers most of the technical control gap) |
+| **FedRAMP High** | NIST 800-53 R4 controls applicable to FedRAMP High baseline | High — same as FedRAMP Moderate plus stricter audit/logging/CloudTrail requirements (multi-region trail, log file validation, ≥1-year retention) |
+| **CIS AWS Foundations Benchmark** | CIS hardening recommendations for AWS — IAM, CloudTrail, Config, monitoring | Moderate — IAM/encryption rules overlap; CIS-specific monitoring rules (CloudTrail metric filters, password policy, etc.) have no cdk-nag equivalent |
+| **HIPAA Security** | HIPAA Security Rule controls | Full — cdk-nag's `HIPAASecurityChecks` covers the same controls |
+| **PCI DSS 3.2.1** | PCI DSS controls | Full — cdk-nag's `PCIDSS321Checks` covers the same controls |
+| **NIST 800-53 R4 / R5** | NIST controls (generic, not FedRAMP-specific) | Full — cdk-nag's `NIST80053R5Checks` (and `NIST80053R4Checks` if enabled) covers the same controls |
+| **AWS Well-Architected** | Mappings against the Well-Architected Framework pillars | None — no cdk-nag equivalent |
+| **AWS Config managed rule conversions** | Hundreds of Config managed rules translated to Guard DSL | Partial — many overlap NIST/HIPAA/PCI; the residual is broad-coverage AWS service rules cdk-nag doesn't ship |
+
+#### What FedRAMP would actually buy on top of cdk-nag
+
+FedRAMP Moderate and High are AWS's profiles for federal-government workloads. Both derive from NIST 800-53 — Moderate ≈ NIST 800-53 Moderate baseline; High ≈ NIST 800-53 High baseline plus extra audit/availability controls — so the bulk of the *technical* control content is already enforced by cdk-nag's `NIST80053R5Checks` pack. The FedRAMP-specific gaps in this reference architecture would be:
+
+- **CloudTrail multi-region trail with log file validation** (FedRAMP requires this on the account; not enforced at the resource level by cdk-nag).
+- **CloudTrail and CloudWatch Logs retention ≥ 1 year** (cdk-nag doesn't enforce a specific retention floor).
+- **AWS Backup plan with cross-region copy** for stateful resources (cdk-nag flags `DynamoDBInBackupPlan` but doesn't require cross-region; this stack uses PITR instead and that suppression is documented above).
+- **VPC flow logs on every VPC** (N/A here — this stack is fully serverless).
+- **IAM password policy / MFA on root account** (account-level, not stack-level — neither cdk-nag nor cfn-guard can enforce this from a stack template).
+
+Most of these are either N/A (no VPC, no root-account-level rules in a template), already implemented (encryption, logging), or covered procedurally rather than at the CFN level (CloudTrail and Backup are typically deployed account-wide, not per-stack). Adding the FedRAMP packs to *this* stack would surface ~zero net-new actionable findings; it would matter for an account intended for FedRAMP authorization, which a public reference architecture isn't.
+
+For a serverless reference architecture already invested in the cdk-nag suppression model — `CDK_LAMBDA_SUPPRESSIONS`, `suppress_cdk_singletons`, per-construct `add_resource_suppressions` calls, the four-pack `apply_compliance_aspects` aspect — layering a second validator would be net-negative: duplicate findings, two allow-lists to maintain, no unique rule coverage gained. cdk-nag stays as the sole compliance gate.
+
 ### Suppressions
 
 Not every rule is appropriate for a sample application. Where a rule has been intentionally suppressed, the suppression lives in the stack file in either `NagSuppressions.add_stack_suppressions` (stack-wide) or `NagSuppressions.add_resource_suppressions`/`add_resource_suppressions_by_path` (targeted to a specific resource). Each entry includes a `reason` field explaining why it was suppressed rather than fixed.
@@ -1308,6 +1358,106 @@ Every resource in this stack is declared explicitly in CDK with `removal_policy=
 > # Delete the old one
 > aws cloudwatch delete-dashboard --dashboard-names "ApplicationInsights-<old-resource-group-name>"
 > ```
+
+## Scaling beyond a reference architecture
+
+This project is a single-developer sample. AWS publishes broader guidance in [Best practices for scaling AWS CDK adoption within your organization](https://aws.amazon.com/blogs/devops/best-practices-for-scaling-aws-cdk-adoption-within-your-organization/) — most of which (private Construct Hubs, golden pipelines, multi-account strategies, Internal Developer Platforms, communities of practice) is org-scale guidance that doesn't apply at this size. The notes below capture which of that post's recommendations are already in place, which were analyzed earlier and skipped, which are worth flagging if you fork this for a real workload, and which are simply N/A.
+
+### Already in place
+
+| Recommendation | Status |
+|----------------|--------|
+| **cdk-nag with custom Aspects** for org-specific policy enforcement | Five-pack `apply_compliance_aspects` aspect, see [CDK security checks](#cdk-security-checks) |
+| **cdk-monitoring-constructs** for dashboards and alarms | Wired through `MonitoringFacade` covering Lambda, API Gateway, DynamoDB |
+| **CDK code held to application-code quality standards** | ruff, mypy, pylint, bandit, pip-audit all run via pre-commit and CI |
+| **Automated CI/CD with policy gates** | GitHub Actions runs `cdk synth` (which runs cdk-nag) on every PR, blocks merge on findings |
+
+### Already analyzed and skipped
+
+- **`cdk-validator-cfnguard`** / cfn-guard plugin layer — see [Why cdk-nag and not cfn-guard or Checkov](#why-cdk-nag-and-not-cfn-guard-or-checkov) for the full comparison. Adding it on top of cdk-nag would duplicate compliance content with no unique rule coverage gained.
+
+### Worth flagging if forked for a real workload
+
+- **[`cdk-wakeful`](https://github.com/aws-samples/cdk-wakeful)** — an alerting layer on top of `cdk-monitoring-constructs`. The current `MonitoringFacade` creates dashboards and alarms but the alarms aren't wired to anything — nobody gets paged on a 5xx spike or Lambda error rate. cdk-wakeful auto-routes alarms to SNS, with built-in integrations for AWS Chatbot and SSM Incident Manager. Single-line CDK change to enable. Cost: an SNS topic + subscription (negligible). Real win if the stack is going to be operated; pointless if it's a portfolio piece nobody monitors.
+
+- **AWS Config conformance packs deployed via CDK** — different *timing* layer from cdk-nag: cdk-nag is preventive at synth time, Config is detective at runtime. Catches drift introduced after deploy (someone disables KMS via console, a new resource type that an Aspect rule doesn't yet cover, IAM policy expansion via service-linked roles). Could live as a sibling stack `HelloWorldComplianceStack` deploying an `AWS::Config::ConformancePack` referencing one of AWS's published templates ([Operational Best Practices for HIPAA Security](https://docs.aws.amazon.com/config/latest/developerguide/operational-best-practices-for-hipaa_security.html), Operational Best Practices for FedRAMP, etc.). Fits the existing "synth-time + runtime + access-log analytics" theme. Cost: Config has per-rule-evaluation pricing that scales with resource count, plus the configuration recorder itself.
+
+- **CloudFormation Hooks for post-synthesis validation** — defensive *during stack operations*, not at synth or runtime. Catches the case where someone bypasses CI and pushes raw CloudFormation to the API directly (e.g., a misconfigured deploy script, a manually-crafted change set). Implementation is substantial — Hooks are a separate registry resource type with their own Python handler and deploy infrastructure. For a single-developer reference architecture this is meaningful complexity for marginal benefit; the realistic threat model here is the developer's own pre-commit hooks, not adversarial CFN injection. More compelling in a multi-team org where multiple roles have CFN deploy permissions.
+
+### Skip — N/A at this scale
+
+- **Private Construct Hub**, approve-and-publish model for constructs, golden pipelines (centrally-managed, immutable from workload teams), ITSM approval integration, multi-account strategy with cross-account pipelines, Internal Developer Platforms (Backstage / Humanitec / Port), Communities of Practice, value-stream team alignment, multi-region deployment — all assume an org with multiple workload teams sharing a platform-engineering function. None apply to a single repo with one author.
+
+- **CDK Pipelines** specifically (replacing GitHub Actions with `pipelines.CodePipeline`): doesn't add capability — same build/test/deploy outcome — but costs ~$1/month per pipeline + CodeBuild minutes and migrates a working setup. Worth considering only if you specifically want a CDK-native, in-code pipeline definition that lives alongside the stacks; otherwise GitHub Actions is fine and free.
+
+- **CodeGuru Security / CodeWhisperer** for CDK code analysis: overlaps Bandit (already wired) and the editor-side AI assistant. Both add per-line scanning costs and produce findings the existing pipeline already covers. Optional polish, not a gap.
+
+## AWS services for post-deployment operations
+
+The in-stack [Monitoring](#monitoring) section covers what's wired into the CDK stacks themselves (CloudWatch dashboards, alarms via `cdk-monitoring-constructs`, RUM, X-Ray, access-log analytics via Athena). The services below are the *account-level* operational layer that complements it — security findings, compliance evidence, cost analysis, ML-driven anomaly detection, runbook automation, and incident response. None of them are wired into this repo today; this section is a forward-looking inventory for anyone forking this for a real workload.
+
+### Alerting and incident response
+
+- **AWS Chatbot** — bridges AWS service notifications (CloudWatch alarms, AWS Health events, Security Hub findings, GuardDuty alerts, CodePipeline status, Config rule changes) to **Slack channels**, Microsoft Teams, and Amazon Chime via SNS. Single SNS topic + one Chatbot configuration per channel; no custom Lambda required. Pairs naturally with [`cdk-wakeful`](#scaling-beyond-a-reference-architecture) for the in-stack alarm side.
+- **AWS Systems Manager Incident Manager** — incident response orchestration: on-call rotations, escalation plans, response plans that auto-trigger runbooks, contact channels (SMS / voice / email / Slack via Chatbot). Wires into CloudWatch alarms or EventBridge rules. Charges per response plan execution + notification fees.
+- **AWS Health Dashboard** — service-health events, planned maintenance, and account-specific issues (e.g., "your Lambda function in us-east-1 may be affected by Service Event X"). Free, surfaced via EventBridge for routing to Chatbot / SNS / SSM Incident Manager. Often skipped in greenfield setups and missed when an outage hits.
+- **AWS Systems Manager Automation** — runbook engine for routine ops (patch, restart, snapshot, remediate non-compliant resources, copy logs). Hundreds of AWS-managed runbooks; you can author your own in YAML/JSON. Combines well with EventBridge rules to auto-remediate Config or Security Hub findings.
+
+### Cost and rightsizing
+
+- **AWS Cost & Usage Report (CUR)** — granular hourly billing data (per-resource, per-tag, per-pricing-dimension) delivered to S3, queryable via Athena. The detailed alternative to Cost Explorer for chargeback, financial-team integration, and trend analysis. Free to enable; you pay for the S3 storage + Athena queries.
+- **AWS Compute Optimizer** — ML-driven rightsizing recommendations for Lambda (memory tuning, provisioned-concurrency suggestions), EC2 (instance type), EBS, ECS on Fargate, RDS. Free for the basic tier. Often surfaces 20-40% cost savings on undersized Lambda memory configurations on the first scan. Worth enabling for any production stack with non-trivial Lambda traffic.
+- **AWS Trusted Advisor** — cost / security / performance / fault tolerance / service-limit checks. The free tier ships seven core checks; the full ~110-check set requires Business or Enterprise Support. Findings are exposed via the Trusted Advisor console, EventBridge, and the Support API.
+- **AWS Support API** — programmatic access to support cases, Trusted Advisor checks, and AWS Health events. Requires **Business Support tier or higher** ($100/month minimum). Useful when integrating Trusted Advisor findings or AWS Health events into custom dashboards or CI gates.
+
+### Security findings and threat detection
+
+| Service | What it detects | Timing | Cost model |
+|---------|-----------------|--------|------------|
+| **AWS Inspector** | Software vulnerabilities (CVEs) in Lambda code, container images, and EC2 OS packages | Scans on resource creation/change + continuous re-scan | Per-resource scanned per month (~$1.50 / Lambda function / month, ~$0.09 / image scan) |
+| **AWS GuardDuty** | *Threats* — anomalous API behavior, compromised credentials (`UnauthorizedAccess:IAMUser/`), malware on EC2/EBS, unusual traffic patterns, S3 anomalies | Continuous, ML-based on VPC Flow Logs, CloudTrail, DNS logs | Per GB of analyzed events; ~$3-15/month for a small account |
+| **AWS Detective** | *Investigation aid* — graph-database analysis of GuardDuty/Security Hub findings, post-incident forensics | Triggered by an existing finding; not a detector itself | Per GB of ingested log data; only useful after Inspector/GuardDuty are already running |
+| **AWS Shield** | DDoS attacks at L3-L7 | Always on for CloudFront/Route 53/ELB (Standard tier, free); managed mitigation team + cost protection requires Advanced ($3,000/month) | Standard: free. Advanced: $3,000/month flat plus traffic |
+
+Short version of the "vs" question: **Inspector** = "what packages am I running with known CVEs"; **GuardDuty** = "is someone or something acting suspiciously in my account"; **Detective** = "this finding looks bad, show me everything related to it for the last 90 days"; **Shield** = "block volumetric DDoS traffic before it hits my origin." They compose — most production accounts run Inspector + GuardDuty as the detection layer, Detective as the investigation layer, Shield Standard automatically. Shield Advanced is reserved for high-stakes public-facing workloads.
+
+- **AWS Security Hub** — the *aggregator*: pulls findings from Inspector, GuardDuty, IAM Access Analyzer, Macie, Firewall Manager, Health, Config, third-party tools, and applies the **Foundational Security Best Practices** + **CIS AWS Foundations Benchmark** + **PCI DSS** + **NIST 800-53 Rev 5** standards. Single pane of glass with a normalized finding format (ASFF). Routes via EventBridge to Chatbot / SSM Incident Manager / your ITSM. The recommended starting point for any production account.
+
+### Compliance and audit
+
+- **AWS Config and Conformance Packs** — see also [Scaling beyond a reference architecture](#scaling-beyond-a-reference-architecture). Config records resource configurations and evaluates managed/custom rules continuously; Conformance Packs are pre-built rule collections (HIPAA, FedRAMP, NIST, PCI, CIS, etc.) deployed as a single CFN template. Different *timing* layer from cdk-nag — synth-time prevention vs. runtime detection of drift.
+- **AWS Audit Manager** — collects evidence continuously for **specific compliance frameworks** (FedRAMP Moderate / High, HIPAA, PCI DSS, SOC 2, GDPR, NIST 800-53, etc.) and produces audit-ready reports. Pulls from Config, Security Hub, CloudTrail, IAM. Charges per assessment.
+
+### Resilience and chaos engineering
+
+- **AWS Resilience Hub** — assess and improve workload resilience against defined RTO / RPO targets. Models failures across regions, AZs, and dependencies; recommends improvements (multi-AZ, backup plans, cross-region replication). Useful gate before declaring a workload "production-ready."
+- **AWS Fault Injection Service (FIS)** — managed chaos engineering. Inject faults (kill instances, throttle APIs, simulate AZ failure, network impairment) on schedule or on-demand. Lower-effort entry point than DIY chaos with Toxiproxy/Chaos Mesh; integrates with Resilience Hub findings.
+
+### ML-driven anomaly detection
+
+- **AWS DevOps Guru** — analyzes CloudWatch metrics, CloudTrail events, and (optionally) **CloudWatch Logs** for operational anomalies — surges, error-rate spikes, deployment-related regressions, IAM policy expansion, latency drift. Worth enabling with **log anomaly detection** on the Lambda log groups, **OpsItem creation** in Systems Manager OpsCenter (so anomalies become tracked tickets rather than dashboard noise), and the **cost estimator** (so you see the dollar impact of each anomaly when triaging). $0.0028/resource/hour after a free trial; meaningful spend at scale.
+- **AWS Systems Manager Application Manager** — view-and-act dashboard scoped to "an application" (a CloudFormation stack and any tag-grouped resources). Surfaces CloudWatch metrics, CloudWatch Logs Insights queries, Config compliance, OpsItems, runbook executions, and cost — all filtered to one application. To make this work end-to-end:
+  1. Tag every resource (and the CloudFormation stack itself) with `AppManagerCFNStackKey: <stack-name>` so cost data lights up in Cost Explorer alongside the operational data.
+  2. Set up an AWS Config configuration recorder in the account.
+  3. Attach the relevant **Conformance Packs** so compliance status appears under the Application Manager application view.
+  4. Wire **CloudWatch Logs Insights queries** as saved queries on the application's log groups for one-click log triage.
+
+### Self-service and inventory
+
+- **AWS Resource Groups** — group resources by tag, CloudFormation stack, or query for cross-service operations (bulk apply Tags, run an Automation document over the group, scope an Application Manager view). Free; the underlying primitive that Application Manager and many service-catalog patterns build on.
+- **AWS Service Catalog** — internal portfolio of approved CDK / CloudFormation / Terraform templates that workload teams can self-deploy from with parameter inputs. Often paired with Control Tower to give downstream teams a constrained "menu" of deployable stacks. Org-scale only — single-developer reference architectures don't benefit.
+
+### Reviews and assessment
+
+- **AWS Well-Architected Tool** — guided workload reviews against the six pillars (operational excellence, security, reliability, performance efficiency, cost optimization, sustainability) plus optional lenses (Serverless, SaaS, ML, etc.). Produces an improvement plan with prioritized remediations. Free; recommended before any "production-readiness" sign-off.
+
+### CloudTrail in new accounts (always)
+
+For any AWS account that doesn't already have an org-level trail: **enable AWS CloudTrail with a multi-region trail that delivers to CloudWatch Logs**, in addition to its default S3 destination. The CloudWatch Logs destination is what makes anomaly detection (DevOps Guru, Security Hub, GuardDuty, custom EventBridge rules) work in real time — the S3-only flow is too high-latency for alerting. Reference: [Datadog's coverage of the underlying detection rule](https://docs.datadoghq.com/security/default_rules/def-000-bop/).
+
+### What *not* to wire up
+
+- **Amazon QuickSight for CloudFront / S3 access-log visualization** — **don't.** QuickSight charges $24/user/month for Reader (capacity) plus per-session fees, and the visualizations it produces over access logs are achievable via Athena directly with no per-user license. The existing Glue catalog + Athena WorkGroup + named queries in the frontend stack already deliver the same insight for free. QuickSight is a fit only when you have a non-technical audience that needs interactive dashboards and BI-style drill-down — not for an engineering team querying access logs.
 
 ## Cleanup
 
