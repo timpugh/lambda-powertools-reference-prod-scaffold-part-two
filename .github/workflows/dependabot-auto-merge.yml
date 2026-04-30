@@ -9,7 +9,13 @@ permissions:
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
+    # Gate on the PR's *author*, not the latest event's actor. github.actor is
+    # whoever triggered the most recent run — when a maintainer pushes a fix to
+    # a Dependabot branch (e.g. `make lock` after the lambda/requirements.txt
+    # drift gate fails), the actor flips to that human and the whole job
+    # silently skips. The PR's user.login stays pinned to the original opener,
+    # so this condition keeps the auto-merge eligible across follow-up pushes.
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
 
     steps:
       - name: Fetch Dependabot metadata
