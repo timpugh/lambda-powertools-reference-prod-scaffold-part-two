@@ -18,7 +18,7 @@ LAMBDA_RUN := $(LAMBDA_ENV) uv run
 
 .PHONY: help install install-cdk install-lambda test test-cdk test-integration \
 	lint format typecheck security cdk-synth cdk-notices cdk-deprecations \
-	docs docs-open docs-serve lock upgrade clean
+	deploy destroy docs docs-open docs-serve lock upgrade clean
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -30,11 +30,20 @@ help: ## Show this help message
 install: install-cdk install-lambda ## Install both environments and pre-commit hooks
 	.venv/bin/pre-commit install
 
+# --locked mirrors CI (.github/workflows/ci.yml). Without it, a stale uv.lock
+# would silently install whatever the resolver picks today, which can drift
+# from CI's pinned set. With it, `make install` after a pyproject.toml edit
+# will fail until `make lock` is run, which is the desired contract.
 install-cdk: ## Install the CDK workstation env into .venv (cdk + test + lint + docs)
-	uv sync --group cdk --group test --group lint --group docs
+	uv sync --locked --group cdk --group test --group lint --group docs
 
-install-lambda: ## Install the Lambda runtime env into .venv-lambda (lambda + test)
-	$(LAMBDA_ENV) uv sync --only-group lambda --only-group test
+# The lint group rides into .venv-lambda alongside the runtime so `make
+# typecheck` can run mypy in this env over lambda/ and scripts/ (where
+# Powertools is importable but aws-cdk-lib is not). Without lint here,
+# mypy is missing entirely and the typecheck target falls back to the
+# weaker .venv-side check that treats Powertools as Any.
+install-lambda: ## Install the Lambda runtime env into .venv-lambda (lambda + test + lint)
+	$(LAMBDA_ENV) uv sync --locked --only-group lambda --only-group test --only-group lint
 
 # =============================================================================
 # Testing
@@ -66,14 +75,36 @@ cdk-notices: ## Show AWS-published CDK notices (CVEs, deprecated CDK versions, u
 cdk-deprecations: ## List every deprecated CDK API used by any stack (synth output filtered for "deprecated")
 	cdk synth '**' 2>&1 | grep -i deprecat || echo "No deprecated CDK APIs in use"
 
+# The '**' glob is required so CDK descends into the Stage-nested stacks —
+# without it `cdk deploy` only sees the empty Stage manifest and exits with
+# "No stack found in the main cloud assembly". --require-approval never
+# skips the interactive IAM-change prompt; cdk-nag has already gated the
+# change at synth time. Drop the flag for a manual review of every IAM diff.
+deploy: ## Deploy all stacks to us-east-1 (use `cdk deploy '**' -c region=X` for other regions)
+	cdk deploy '**' --require-approval never
+
+# `cdk destroy '**'` interactively confirms before deleting each stack;
+# answer 'y' to proceed or pass --force to skip the prompt. Three stacks
+# are destroyed independently — WAF first (no dependents), then backend
+# and frontend in parallel.
+destroy: ## Destroy all stacks in us-east-1 (use `cdk destroy '**' -c region=X` for other regions)
+	cdk destroy '**'
+
 lint: ## Run all pre-commit hooks (ruff, mypy, pylint, bandit, xenon, pip-audit)
 	uv run pre-commit run --all-files
 
 format: ## Format code with ruff
 	uv run ruff format .
 
-typecheck: ## Run mypy type checking
-	uv run mypy lambda/ hello_world/
+typecheck: ## Run mypy type checking (CDK side in .venv, Lambda runtime + scripts in .venv-lambda)
+	# .venv has aws-cdk-lib + boto3-stubs but not Powertools (attrs conflict),
+	# so it checks the CDK construct code only. .venv-lambda has Powertools
+	# and lint tooling, so it checks the Lambda handler and the scripts/
+	# helpers that import from it (notably scripts/generate_openapi.py).
+	# The pre-commit mypy hook holds the CDK side and excludes scripts/ for
+	# the same reason — see .pre-commit-config.yaml.
+	uv run mypy hello_world/
+	$(LAMBDA_RUN) mypy lambda/ scripts/
 
 security: ## Run bandit security scan and pip-audit vulnerability check
 	uv run bandit -r lambda/ hello_world/

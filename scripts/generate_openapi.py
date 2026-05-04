@@ -99,9 +99,7 @@ def _inject_apigateway_extensions(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> None:
-    # Powertools' ApiGatewayResolver exposes get_openapi_json_schema at runtime
-    # but the method is not declared in the current type stubs.
-    spec = app.get_openapi_json_schema(  # type: ignore[attr-defined]
+    spec = app.get_openapi_json_schema(
         title="Hello World API",
         version="1.0.0",
         description=DESCRIPTION,

@@ -9,6 +9,7 @@ Data Classes.
 """
 
 import os
+from typing import cast
 
 from aws_lambda_powertools import Logger, Metrics, Tracer
 from aws_lambda_powertools.event_handler import APIGatewayRestResolver
@@ -145,4 +146,9 @@ def lambda_handler(event: dict, context: LambdaContext) -> dict:
     Returns:
         dict: API Gateway Lambda proxy response.
     """
-    return app.resolve(event, context)  # type: ignore[no-any-return]
+    # cast() satisfies both mypy environments. Powertools' app.resolve()
+    # is well-typed in .venv-lambda (where Powertools is installed) and
+    # appears as Any in pre-commit's .venv (no Powertools, attrs conflict
+    # — see .pre-commit-config.yaml mypy comment). The cast is explicit
+    # at the type-check layer and a no-op at runtime.
+    return cast(dict, app.resolve(event, context))
