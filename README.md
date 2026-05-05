@@ -779,7 +779,18 @@ All Python dependencies live in a single `pyproject.toml` with five groups (`lam
 
 **When a `make lock` push is required.** The packaged Lambda installs from a flat `lambda/requirements.txt` at deploy time (CDK's `PythonFunction` construct expects one). That file is generated from `uv.lock` via `uv export --only-group lambda --no-emit-project` and is treated as a build artifact. The `quality` job in CI re-runs that export and fails if the committed file drifts from what the current `uv.lock` would produce — this is what stops a stale `requirements.txt` from shipping to production Lambda when Dependabot bumps a runtime dep.
 
-Dependabot updates `uv.lock` but **not** the exported `requirements.txt`, so any uv PR that touches the `lambda` group (`aws-lambda-powertools`, `boto*`, `botocore`, `aws-encryption-sdk`, etc.) will fail the drift check on first CI run. The PR sits open with auto-merge already armed, waiting on the failing check. To unblock it, a maintainer runs:
+Dependabot updates `uv.lock` but **not** the exported `requirements.txt`, so any uv PR that touches the `lambda` group (`aws-lambda-powertools`, `boto*`, `botocore`, `aws-encryption-sdk`, etc.) will fail the drift check on first CI run. The PR sits open with auto-merge already armed, waiting on the failing check.
+
+The simplest way to unblock these is `make deps-merge`, which automates the rebase + `make lock` + push + arm-auto-merge loop across every open Dependabot PR sequentially:
+
+```bash
+make deps-merge            # process every open Dependabot PR
+make deps-merge PR=42      # process only PR #42 (skips the wait between PRs)
+```
+
+For each PR the script does: sync main → checkout the PR branch → rebase onto main → run `make lock` → run `uv run ruff format .` (catches reformatter drift from a `ruff` bump) → commit and force-push if there's content → arm `gh pr merge --auto --squash`. When processing all, it then waits for the PR to merge before moving to the next so each subsequent PR rebases onto a main that already includes its predecessors (sequential is required because every `make lock` regenerates `uv.lock` and concurrent processing would clobber predecessors at squash-merge time). PRs whose rebase conflicts, whose `make lock` fails, or whose CI surfaces a real failure are skipped with a clear log line — the script never `--admin`-bypasses failing checks.
+
+Equivalent manual flow if you'd rather drive each PR by hand:
 
 ```bash
 gh pr checkout <pr-number>     # check out the Dependabot branch
@@ -789,7 +800,7 @@ git commit -m "chore: regenerate lambda/requirements.txt"
 git push
 ```
 
-The push triggers a fresh CI run; once it greens, the auto-merge that was already armed fires and GitHub merges the PR. No second approval click is needed.
+In either case the push triggers a fresh CI run; once it greens, the auto-merge that was already armed fires and GitHub merges the PR. No second approval click is needed.
 
 PRs that only touch non-lambda groups (`aws-cdk`, `pytest`, `docs`, `linting`) do not drift `lambda/requirements.txt` and merge themselves with no maintainer involvement.
 

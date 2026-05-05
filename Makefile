@@ -18,7 +18,7 @@ LAMBDA_RUN := $(LAMBDA_ENV) uv run
 
 .PHONY: help install install-cdk install-lambda test test-cdk test-integration \
 	lint format typecheck security cdk-synth cdk-notices cdk-deprecations \
-	deploy destroy docs docs-open docs-serve lock upgrade clean
+	deploy destroy docs docs-open docs-serve lock upgrade deps-merge clean
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -157,6 +157,14 @@ lock: ## Regenerate uv.lock and lambda/requirements.txt from pyproject.toml
 upgrade: ## Upgrade all dependencies to latest versions older than COOLDOWN_DAYS days
 	uv lock --upgrade --exclude-newer $(COOLDOWN_CUTOFF)
 	uv export --only-group lambda --no-emit-project --no-header --format requirements.txt -o lambda/requirements.txt
+
+# Wrapper around scripts/deps_merge.sh — see the file header for the full
+# step list. Pass PR=N to handle a single PR; omit to process every open
+# Dependabot PR sequentially. Sequential is required because each `make lock`
+# regenerates uv.lock, and concurrent processing would have later PRs clobber
+# earlier ones during squash-merge.
+deps-merge: ## Process Dependabot PRs (rebase + lock + push + arm auto-merge). Use PR=N for one, omit for all open.
+	@bash scripts/deps_merge.sh $(PR)
 
 # =============================================================================
 # Cleanup
