@@ -54,12 +54,17 @@ trap cleanup EXIT
 
 # ---- Build the list of PRs to process -------------------------------------
 SINGLE_PR="${1:-}"
+PR_NUMBERS=()
 if [ -n "$SINGLE_PR" ]; then
-    PR_NUMBERS=("$SINGLE_PR")
+    PR_NUMBERS+=("$SINGLE_PR")
 else
     # Oldest-first: ensures earlier PRs land before later ones rebase, so each
-    # `make lock` runs against a main that includes its predecessors.
-    mapfile -t PR_NUMBERS < <(
+    # `make lock` runs against a main that includes its predecessors. Plain
+    # `while read` loop instead of `mapfile` so this stays bash-3.2 compatible
+    # (macOS ships bash 3.2, which lacks mapfile).
+    while IFS= read -r pr_number; do
+        PR_NUMBERS+=("$pr_number")
+    done < <(
         gh pr list --state open --author "app/dependabot" \
             --json number,createdAt --jq 'sort_by(.createdAt)[].number'
     )
