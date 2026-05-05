@@ -21,6 +21,18 @@ jobs:
       - name: Fetch Dependabot metadata
         id: metadata
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98  # v3.1.0
+        with:
+          # The default refuses when the latest commit isn't signed by
+          # Dependabot's GPG key. That's the right default in isolation, but
+          # it breaks the maintainer-push flow this repo relies on: the
+          # `make deps-merge` script (and its manual equivalent) force-pushes
+          # `make lock` regenerations onto Dependabot branches, and those
+          # commits are signed by the maintainer, not Dependabot. The job
+          # is already gated on `pull_request.user.login == dependabot[bot]`,
+          # which protects the PR author identity. Skipping the
+          # commit-signature check here trades one layer of belt-and-braces
+          # for the ability to ship the maintainer-push workflow at all.
+          skip-commit-verification: true
 
       # Auto-merge is restricted to patch and minor GitHub Actions bumps.
       # Majors (v4 → v5) can contain breaking input/output changes and carry
