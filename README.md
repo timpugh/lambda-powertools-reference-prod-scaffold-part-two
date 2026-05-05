@@ -166,19 +166,26 @@ If you open the project in VS Code, the `.vscode/` directory pre-configures ruff
 Common commands are available via `make`. Run `make help` to see all targets:
 
 ```bash
-make install        # set up both venvs (.venv + .venv-lambda) and pre-commit hooks
-make test           # run unit tests with coverage (in .venv-lambda)
-make test-cdk       # run CDK stack assertion tests (in .venv)
-make test-integration  # run integration tests (requires deployed stack)
-make lint           # run all pre-commit hooks (ruff, mypy, pylint, bandit, xenon, pip-audit)
-make format         # format code with ruff
-make typecheck      # run mypy type checking
-make security       # run bandit + pip-audit
-make docs           # build Zensical HTML docs
-make docs-open      # build and open docs in browser
-make lock           # regenerate uv.lock and lambda/requirements.txt from pyproject.toml
-make upgrade        # upgrade all dependencies (respects COOLDOWN_DAYS, default 7)
-make clean          # remove build artifacts, caches, and coverage files
+make install            # set up both venvs (.venv + .venv-lambda) and pre-commit hooks
+make test               # run unit tests with coverage (in .venv-lambda)
+make test-cdk           # run CDK stack assertion tests (in .venv)
+make test-integration   # run integration tests (requires deployed stack)
+make lint               # run all pre-commit hooks (ruff, mypy, pylint, bandit, xenon, pip-audit)
+make format             # format code with ruff
+make typecheck          # run mypy in both venvs (CDK side in .venv, Lambda runtime + scripts in .venv-lambda)
+make security           # run bandit (direct) + pip-audit (via pre-commit so the CVE ignore list stays single-sourced)
+make cdk-synth          # synthesize all stacks (with '**' glob so cdk-nag descends into Stage-nested stacks)
+make cdk-notices        # show AWS-published CDK notices (CVEs, deprecated CDK versions, breaking changes)
+make cdk-deprecations   # list deprecated CDK APIs in use (synth output filtered for "deprecated")
+make deploy             # cdk deploy '**' --require-approval never (us-east-1; pass `-c region=X` for others)
+make destroy            # cdk destroy '**' (interactive confirmation; pass --force to skip)
+make docs               # build Zensical HTML docs
+make docs-open          # build and open docs in browser
+make docs-serve         # regenerate OpenAPI + start Zensical dev server with hot reload
+make lock               # regenerate uv.lock and lambda/requirements.txt from pyproject.toml
+make upgrade            # upgrade all dependencies (respects COOLDOWN_DAYS, default 7)
+make deps-merge         # process every open Dependabot PR (rebase + lock + push + arm auto-merge); use PR=N for one
+make clean              # remove build artifacts, caches, and coverage files
 ```
 
 ## Prerequisites
@@ -733,7 +740,7 @@ Four workflows are configured:
 | **CI** | Push / PR to `main` | Three jobs: pre-commit hooks (`quality`), pytest unit tests (`test`), CDK synth + stack assertion tests (`cdk-check`) |
 | **Docs** | Push to `main` | Builds Zensical docs and deploys to GitHub Pages |
 | **Dependency Audit** | Every Monday 9am UTC | Runs `pip-audit` against each dependency group exported from `uv.lock` |
-| **Dependabot Auto-merge** | Dependabot PRs | Approves and auto-merges patch/minor updates from both ecosystems (GitHub Actions + uv) when CI passes; majors stay manual |
+| **Dependabot Auto-merge** | Dependabot PRs | Approves and auto-merges patch/minor updates from `github_actions`, `uv`, and `pip` ecosystems when CI passes; majors stay manual. Gated on PR opener (not latest pusher) so maintainer pushes via `make deps-merge` don't disarm it |
 
 All three CI jobs must pass before anything can merge to `main` (branch protection).
 
@@ -756,8 +763,11 @@ Dependabot is configured in `.github/dependabot.yml` to check for updates every 
 | `uv` | `pyproject.toml` + `uv.lock` — every dependency group in one lock file, regenerated atomically | Patch and minor updates auto-merge once CI passes; major updates require human review. Updates that touch the `lambda` runtime group (e.g. `boto*`, `aws-lambda-powertools`) need a one-time `make lock` push from a maintainer before CI greens — see "Python (`uv`) updates" below |
 
 The `dependabot-auto-merge` workflow runs on every Dependabot PR and approves + arms auto-merge when **all** of the following hold:
-1. `dependabot/fetch-metadata` reports the ecosystem as `github_actions` or `uv`
-2. `dependabot/fetch-metadata` reports the update type as `version-update:semver-patch` or `version-update:semver-minor`
+1. The PR's *opener* is Dependabot — `github.event.pull_request.user.login == 'dependabot[bot]'`. Gating on the PR opener (not `github.actor`, the latest pusher) keeps the workflow eligible across maintainer follow-up pushes — for example, the `make deps-merge` script's `make lock` regenerations on Dependabot branches.
+2. `dependabot/fetch-metadata` reports the ecosystem as `github_actions`, `uv`, or `pip`. Both `uv` and `pip` are accepted because Dependabot's `uv` ecosystem reports `pip` in `fetch-metadata` output (uv builds on pip's resolver, so the metadata action surfaces the underlying tool rather than the configured ecosystem).
+3. `dependabot/fetch-metadata` reports the update type as `version-update:semver-patch` or `version-update:semver-minor`.
+
+The metadata action is configured with `skip-commit-verification: true`. Without it, `fetch-metadata` refuses to proceed when the PR's latest commit isn't signed by Dependabot's GPG key — and after a `make deps-merge` push, the latest commit is the maintainer's. The job-level PR-opener gate above already protects the author identity, so dropping the commit-signature layer is what makes the maintainer-push flow work.
 
 Once auto-merge is armed, GitHub itself waits for required status checks (the `quality`, `test`, and `cdk-check` jobs) to pass and then merges the PR. If any check fails, the PR stays open with auto-merge enabled but unsatisfied, surfacing the failure rather than silently merging.
 
