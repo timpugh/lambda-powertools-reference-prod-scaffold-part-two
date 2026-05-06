@@ -91,6 +91,16 @@ jobs:
       - name: Install CDK CLI
         run: npm install -g aws-cdk
 
+      # CDK's PythonFunction bundling pulls public.ecr.aws/sam/build-python3.13
+      # for the Lambda function's architecture. The Lambda runs on arm64
+      # (Graviton), but ubuntu-latest runners are amd64 — without QEMU's
+      # binfmt_misc handlers registered, executing the arm64 bundling container
+      # fails with `exec /bin/sh: exec format error`. The setup-qemu-action
+      # registers the arm64 handler so Docker can run the cross-arch image.
+      - uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a  # v4.0.0
+        with:
+          platforms: linux/arm64
+
       - name: Run cdk synth
         env:
           CDK_DEFAULT_ACCOUNT: "123456789012"
