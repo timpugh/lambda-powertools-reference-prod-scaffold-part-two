@@ -1,80 +1,52 @@
 {
     "version": "0.2.0",
     "configurations": [
+
         {
-            // AWS Toolkit local-invoke + step-debug for the Hello World Lambda.
-            //
-            // Per AWS Toolkit docs (https://docs.aws.amazon.com/toolkit-for-vscode/latest/userguide/serverless-apps-run-debug-config-ref.html),
-            // "target": "code" invokes a Lambda handler directly without a SAM
-            // template — appropriate here because this project is CDK-managed
-            // (there is no `template.yaml` to point "target": "template" at).
-            //
-            // What this needs to actually run end-to-end:
-            //   1. Docker (or Finch via CDK_DOCKER) running — SAM CLI builds a
-            //      Lambda-runtime container, installs lambda/requirements.txt
-            //      into it, and attaches debugpy.
-            //   2. AWS credentials available in your shell (AWS_PROFILE or
-            //      AWS_ACCESS_KEY_ID/SECRET) — the handler calls SSM, DynamoDB,
-            //      and AppConfig at runtime; without credentials the first
-            //      get_parameter call raises and the handler returns 500.
-            //   3. The deployed stack still up (or pointed at mocked services).
-            //      The env vars below are the live names from the current
-            //      deploy in 590184005900/us-east-1; if you `cdk destroy` and
-            //      redeploy, CDK regenerates these IDs and you'll need to
-            //      refresh them. AppConfig failures are caught and fall back
-            //      to the default (see lambda/app.py).
-            //
-            // To revert this change cleanly: `git revert <commit-hash>` or
-            // `git checkout HEAD~1 -- .vscode/launch.json`.
             "type": "aws-sam",
             "request": "direct-invoke",
-            "name": "AWS Lambda: HelloWorld (local invoke + debug)",
+            "name": "Invoke Lambda",
             "invokeTarget": {
-                "target": "code",
-                "projectRoot": "${workspaceFolder}/lambda",
-                "lambdaHandler": "app.lambda_handler"
+                "target": "template",
+                "templatePath": "Template Location",
+                "logicalId": "Function Logical ID"
             },
             "lambda": {
-                "runtime": "python3.13",
-                "timeoutSec": 30,
                 "payload": {
-                    // API Gateway REST proxy event shape — APIGatewayRestResolver
-                    // routes on httpMethod + resource, and the handler reads
-                    // requestContext.identity.{source_ip,user_agent} +
-                    // requestContext.requestId for structured logging.
-                    "json": {
-                        "httpMethod": "GET",
-                        "path": "/hello",
-                        "resource": "/hello",
-                        "headers": {},
-                        "queryStringParameters": null,
-                        "body": null,
-                        "isBase64Encoded": false,
-                        "requestContext": {
-                            "requestId": "local-debug-request-id",
-                            "stage": "Prod",
-                            "httpMethod": "GET",
-                            "path": "/Prod/hello",
-                            "identity": {
-                                "sourceIp": "127.0.0.1",
-                                "userAgent": "local-debug"
-                            }
-                        }
-                    }
-                },
-                "environmentVariables": {
-                    "POWERTOOLS_SERVICE_NAME": "HelloWorld",
-                    "POWERTOOLS_LOG_LEVEL": "DEBUG",
-                    "AWS_DEFAULT_REGION": "us-east-1",
-                    // Live names from the current deploy. Refresh these from
-                    // `cdk-outputs-frontend.json` (or `aws cloudformation
-                    // describe-stacks --query 'Stacks[].Outputs'`) after any
-                    // destroy + redeploy cycle — CDK auto-generates new IDs.
-                    "GREETING_PARAM_NAME": "CFN-AppGreetingParameterD5E6E64F-1iZ6LfJPrqMc",
-                    "IDEMPOTENCY_TABLE_NAME": "HelloWorld-us-east-1-AppIdempotencyTable7A3F72D5-1NCMD323I031F",
-                    "APPCONFIG_APP_NAME": "HelloWorld-us-east-1-features",
-                    "APPCONFIG_ENV_NAME": "production",
-                    "APPCONFIG_PROFILE_NAME": "feature_flags"
+                    "json": {}
+                }
+            }
+        },
+        {
+            "type": "aws-sam",
+            "request": "direct-invoke",
+            "name": "Invoke Lambda",
+            "invokeTarget": {
+                "target": "code",
+                "lambdaHandler": "Function Handler",
+                "projectRoot": "${workspaceFolder}"
+            },
+            "lambda": {
+                "runtime": "Lambda Runtime",
+                "payload": {
+                    "json": {}
+                }
+            }
+        },
+        {
+            "type": "aws-sam",
+            "request": "direct-invoke",
+            "name": "Invoke Lambda with API Gateway",
+            "invokeTarget": {
+                "target": "api",
+                "templatePath": "Template Location",
+                "logicalId": "Function Logical ID"
+            },
+            "api": {
+                "path": "Path",
+                "httpMethod": "Method",
+                "payload": {
+                    "json": {}
                 }
             }
         },

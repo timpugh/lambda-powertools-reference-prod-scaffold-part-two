@@ -40,11 +40,6 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-json
-        # VS Code config files (.vscode/*.json) are JSONC by convention —
-        # comments and trailing commas are explicitly supported by the IDE
-        # and are useful for documenting non-obvious config choices inline.
-        # The strict-JSON validator rejects them, so exclude that directory.
-        exclude: ^\.vscode/
 
   - repo: local
     hooks:
