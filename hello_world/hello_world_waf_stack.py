@@ -106,55 +106,10 @@ class HelloWorldWafStack(Stack):
                         sampled_requests_enabled=True,
                     ),
                 ),
-                # AWS-managed application-layer (L7) anti-DDoS rule group. Three inner
-                # rules with mixed default actions: ChallengeAllDuringEvent and
-                # ChallengeDDoSRequests fire a silent JS challenge for borderline
-                # classifications (real browsers pass through invisibly, bots that
-                # can't solve it are filtered), and DDoSRequests outright Blocks
-                # high-confidence DDoS traffic. We keep the AWS-supplied defaults
-                # — no rule_action_overrides — because Challenge is the correct
-                # fit for a CloudFront-fronted SPA: every legitimate caller is a
-                # browser, and false-positive cost is much lower than a hard Block.
-                # Capacity: 50 WCU.
-                #
-                # The rule group is one of WAF's "intelligent threat mitigation"
-                # offerings (alongside Bot Control / ATP / ACFP); it requires an
-                # explicit ManagedRuleGroupConfig declaring how the Challenge
-                # action engages with browsers. UsageOfAction=ENABLED tells WAF
-                # to fire the JS challenge autonomously without requiring the
-                # frontend to integrate the optional WAF client-side SDK; the
-                # rule group falls back to label-only mode when set to DISABLED.
-                wafv2.CfnWebACL.RuleProperty(
-                    name="AWSManagedRulesAntiDDoSRuleSet",
-                    priority=1,
-                    statement=wafv2.CfnWebACL.StatementProperty(
-                        managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
-                            vendor_name="AWS",
-                            name="AWSManagedRulesAntiDDoSRuleSet",
-                            managed_rule_group_configs=[
-                                wafv2.CfnWebACL.ManagedRuleGroupConfigProperty(
-                                    aws_managed_rules_anti_d_do_s_rule_set=wafv2.CfnWebACL.AWSManagedRulesAntiDDoSRuleSetProperty(
-                                        client_side_action_config=wafv2.CfnWebACL.ClientSideActionConfigProperty(
-                                            challenge=wafv2.CfnWebACL.ClientSideActionProperty(
-                                                usage_of_action="ENABLED",
-                                            ),
-                                        ),
-                                    ),
-                                ),
-                            ],
-                        )
-                    ),
-                    override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
-                    visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
-                        cloud_watch_metrics_enabled=True,
-                        metric_name=f"{self.stack_name}-AntiDDoSRuleSet",
-                        sampled_requests_enabled=True,
-                    ),
-                ),
                 # Core rule set — protects against OWASP Top 10 web exploits
                 wafv2.CfnWebACL.RuleProperty(
                     name="AWSManagedRulesCommonRuleSet",
-                    priority=2,
+                    priority=1,
                     statement=wafv2.CfnWebACL.StatementProperty(
                         managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
                             vendor_name="AWS",
@@ -171,7 +126,7 @@ class HelloWorldWafStack(Stack):
                 # Blocks requests containing known malicious inputs (SQLi, XSS patterns)
                 wafv2.CfnWebACL.RuleProperty(
                     name="AWSManagedRulesKnownBadInputsRuleSet",
-                    priority=3,
+                    priority=2,
                     statement=wafv2.CfnWebACL.StatementProperty(
                         managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
                             vendor_name="AWS",
@@ -189,7 +144,7 @@ class HelloWorldWafStack(Stack):
                 # Prevents scraping, credential stuffing, and unintentional runaway clients.
                 wafv2.CfnWebACL.RuleProperty(
                     name="RateLimitPerIP",
-                    priority=4,
+                    priority=3,
                     action=wafv2.CfnWebACL.RuleActionProperty(block={}),
                     statement=wafv2.CfnWebACL.StatementProperty(
                         rate_based_statement=wafv2.CfnWebACL.RateBasedStatementProperty(

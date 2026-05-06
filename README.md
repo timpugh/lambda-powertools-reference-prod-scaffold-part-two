@@ -89,7 +89,7 @@ Resources are split across three stacks. All resources in all stacks have `Remov
 
 | Resource | Purpose |
 |---|---|
-| WAF WebACL | CloudFront-scoped WebACL with 4 managed rule groups (IP reputation, anti-DDoS, common rule set, known bad inputs) + per-IP rate limit |
+| WAF WebACL | CloudFront-scoped WebACL with 3 managed rule groups (IP reputation, common rule set, known bad inputs) + per-IP rate limit |
 | KMS Key | Encrypts the WAF log group |
 | CloudWatch Log Group (`aws-waf-logs-*`) | Receives WAF access logs |
 
@@ -1132,21 +1132,18 @@ The trail writes to a separate dedicated bucket (`CloudTrailLogsBucket`) so the 
 
 ### WAF rules
 
-The WebACL sits in front of CloudFront and inspects every request before it reaches S3. Five rules are active, evaluated in priority order:
+The WebACL sits in front of CloudFront and inspects every request before it reaches S3. Four rules are active, evaluated in priority order:
 
-| Priority | Rule | What it does |
+| Priority | Rule | What it blocks |
 |----------|------|---------------|
-| 0 | `AWSManagedRulesAmazonIpReputationList` | Blocks known malicious IPs — botnets, scanners, TOR exits |
-| 1 | `AWSManagedRulesAntiDDoSRuleSet` | Application-layer DDoS protection — silent JS challenge for borderline classifications, outright block for high-confidence DDoS traffic |
-| 2 | `AWSManagedRulesCommonRuleSet` | Blocks OWASP Top 10 web exploits |
-| 3 | `AWSManagedRulesKnownBadInputsRuleSet` | Blocks requests containing SQLi, XSS, and exploit payloads |
-| 4 | `RateLimitPerIP` (custom) | Blocks any single IP exceeding 1,000 requests per 5 minutes |
+| 0 | `AWSManagedRulesAmazonIpReputationList` | Known malicious IPs — botnets, scanners, TOR exits |
+| 1 | `AWSManagedRulesCommonRuleSet` | OWASP Top 10 web exploits |
+| 2 | `AWSManagedRulesKnownBadInputsRuleSet` | Requests containing SQLi, XSS, and exploit payloads |
+| 3 | `RateLimitPerIP` (custom) | Blocks any single IP exceeding 1,000 requests per 5 minutes |
 
-The IP Reputation list (priority 0) is intentionally placed first because it's the cheapest to evaluate (hash lookup against a curated list) and short-circuits the rest of the chain — there is no value in running CRS regex against a known-malicious IP. The Anti-DDoS rule group (priority 1) sits next so that DDoS classification happens before the more expensive regex-based rules.
+All rules are AWS WAF "free-tier" — no per-rule-group entity activation fee. Total fixed cost is $5/month (WebACL) + $1/month per rule = $9/month, plus $0.60 per million inspected requests. Adding any of the four paid-tier managed rule groups (Bot Control, ATP, ACFP, AntiDDoSRuleSet) layers a $10–20/month entity fee on top — see "Considered and rejected" in [Design decisions](#design-decisions-and-known-limitations) for why the AntiDDoS rule group was tried and removed.
 
-The Anti-DDoS rule group contains three inner rules with mixed default actions: `ChallengeAllDuringEvent` and `ChallengeDDoSRequests` use the **Challenge** action (a silent JS challenge — real browsers pass through invisibly, bots that can't solve it are filtered), and `DDoSRequests` uses **Block** for high-confidence DDoS traffic. The CDK code keeps the AWS-supplied defaults rather than overriding everything to Block, because Challenge is the right fit for a CloudFront-fronted SPA where every legitimate caller is a browser — false-positive cost is much lower than a hard Block, and CGNAT/mobile-carrier shared IPs that occasionally trigger the rule still get a chance to prove they're a real client.
-
-*Cost/value note:* 50 WCU capacity (still well under the 1500 WCU pricing cliff), AWS curates the rule group automatically, and the Challenge action gives nuanced enforcement that an IP-deny-list approach can't. The realistic limitation: this rule group's effectiveness depends on AWS having global visibility of an active DDoS event — for a small-traffic site that is itself the target of a custom attack, the rate-limit rule below does more work. As one layer in a defense-in-depth WebACL, it earns its 50 WCU.
+All rules emit CloudWatch metrics and sampled requests, so WAF activity is visible in the console without additional configuration.
 
 All rules emit CloudWatch metrics and sampled requests, so WAF activity is visible in the console without additional configuration.
 
@@ -1435,6 +1432,18 @@ Every resource in this stack is declared explicitly in CDK with `removal_policy=
 2. **The encrypted data has no realistic confidentiality requirement.** What's actually inside this stack's catalog: table definitions for `cloudfront_logs` and `s3_access_logs` with column names like `log_date`, `x_edge_location`, `c_ip`. These match the public CloudFront and S3 access-log schemas — anyone can look up the column list in AWS docs. There are no Glue connections, no JDBC sources, and therefore no connection passwords to protect. Encrypting non-sensitive metadata against a non-existent threat is checkbox security.
 
 If you fork this and your catalog will hold genuinely sensitive table metadata (custom analytics tables for PII, partner data, etc.), wire `glue.CfnDataCatalogEncryptionSettings` into a **separate, intentionally account-scoped** stack rather than into a per-application stack — that way the account-wide nature of the resource is reflected in the deploy boundary, and forks of this app can't accidentally mutate it.
+
+**WAF AntiDDoSRuleSet was implemented and then deliberately reverted** — `AWSManagedRulesAntiDDoSRuleSet` was added at WebACL priority 1 with `UsageOfAction=ENABLED` to provide application-layer DDoS protection. The first deploy attempt failed because I'd referenced a hallucinated rule group name (`AWSManagedRulesAmazonIpDDoSList`), which doesn't exist; the second deploy with the real rule group failed because AntiDDoSRuleSet requires a `ManagedRuleGroupConfig` with a `ClientSideActionConfig` declared; the third deploy with that config failed because `UsageOfAction=ENABLED` requires at least one regex in `ExemptUriRegularExpressions`, and this stack has no URIs to legitimately exempt. By the time we'd worked through the constraints, the cost picture was clearer:
+
+| Charge | Amount | Source |
+|---|---|---|
+| Entity activation fee | **$20.00 / month** per WebACL using the rule group | Verified against the AWS pricing catalog (`/offers/v1.0/aws/awswaf/current/index.json`, group "AMR Anti-DDoS Entity") |
+| Standard rule fee | $1.00 / month | Each managed rule group counts as one of the WebACL's rules |
+| Per-request inspection fee | $0.15 / million requests | On top of the standard $0.60 / million inspection fee |
+
+The other 4 rules in the WebACL (IP Reputation, CRS, Known Bad Inputs, custom rate limit) are all AWS WAF "free-tier" — no entity fee, just $1/month per rule. Only four paid-tier rule groups exist: Bot Control, ATP, ACFP, and AntiDDoSRuleSet. Adding AntiDDoSRuleSet would have raised this stack's fixed WAF cost from $9/month to $30/month — a 70% jump in fixed WAF cost for one rule whose effective enforcement (the `DDoSRequests` Block arm) is gated on AWS observing high-confidence DDoS classification, which is unlikely to fire on a Hello World demo's traffic profile. The existing per-IP rate-limit rule already covers crude L7 DDoS at 1,000 req/5min/IP. Same conclusion as the Glue catalog encryption entry above: high cost, low value at this scale, document and skip.
+
+If you fork this for a workload with real traffic and a realistic DDoS threat model, the rule group is genuinely useful — but treat the $20/month entity fee plus the exempt-URI-list requirement as planning items rather than drop-in additions.
 
 ## Scaling beyond a reference architecture
 
