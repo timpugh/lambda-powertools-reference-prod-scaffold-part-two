@@ -227,8 +227,6 @@ Note: [VS Code's `python-envs.pythonProjects` feature](https://code.visualstudio
 - **Pytest: Current File** — runs `pytest ${file} -v --override-ini=addopts=` under the debugger. The `--override-ini=addopts=` flag clears the global pytest options from `pyproject.toml` (`-n auto`, `--cov-fail-under=100`, the HTML reporter), which would otherwise either fight the debugger or fail single-test runs on the coverage threshold. The same flag is also tagged with `"purpose": ["debug-test"]`, so VS Code's Test Explorer uses this configuration when you click the debug-icon next to a test instead of running its own uncustomized debugpy invocation.
 - **CDK: Synth (app.py)** — runs the root `app.py` (the CDK entry point) under debugpy with the same dummy-account env vars the `cdk-check` CI job uses. Useful when synth blows up and you need to step through stack construction in [hello_world/](hello_world/) — set a breakpoint in any `*_stack.py`, hit F5, and walk the stack assembly.
 
-The three `aws-sam` configs in the same file come from the AWS Toolkit extension and contain placeholder strings (`"Template Location"`, `"Function Logical ID"`, etc.) — they're inert until filled in for SAM-based local Lambda invocation, which this project doesn't use. Either fill them in if you start using SAM locally, or ignore them.
-
 **Test Explorer.** Pylance fixture inlay hints are on (`python.analysis.inlayHints.pytestParameters: true`) — the inferred type for each fixture parameter renders inline at test-function definitions, which makes the indirection in [tests/conftest.py](tests/conftest.py) easier to follow without a hover. The Test Explorer's *Run Tests with Coverage* toolbar button works out of the box because `pytest-cov` is already a dev dependency: it produces per-line gutter decorations for the file under test, scoped to that single run (independent of `make test`'s 100% threshold gate). Note that VS Code's docs flag a known issue where `pytest-cov` suppresses breakpoints when debugging — the Pytest debug config above already dodges this via `--override-ini=addopts=`, which strips `--cov` along with `-n auto`.
 
 **Pylance defaults.** A few Pylance settings are on by default in `.vscode/settings.json` to make the editor signal closer to what the linters enforce:
@@ -237,6 +235,30 @@ The three `aws-sam` configs in the same file come from the AWS Toolkit extension
 - `python.analysis.autoImportCompletions: true` — completing an unknown symbol offers to add the matching `import` line.
 - `python.analysis.autoFormatStrings: true` — typing `{` inside a regular string auto-prefixes the literal with `f` so it becomes an f-string.
 - `python.analysis.inlayHints.{variableTypes,functionReturnTypes,callArgumentNames}` — inline annotations for inferred local-variable types, function return types, and named-argument hints at call sites. `callArgumentNames` is set to `"all"` (the most verbose option); switch to `"partial"` in User Settings if it's too dense at call sites with many args.
+
+## Debugging the Lambda function
+
+This project does not use AWS SAM (`sam local invoke`) for local Lambda debugging. The reason: SAM's debug flow injects an unpinned `debugpy` into the runtime requirements, which conflicts with the project's `--require-hashes` install mode (`lambda/requirements.txt` is pinned by hash via `uv export`). Dropping hash-mode would weaken supply-chain integrity for every CI install, so the project debugs through pytest instead.
+
+**The pytest-as-debugger pattern.** Open a test file under [tests/unit/](tests/unit/) that exercises the code path you want to inspect, set a breakpoint anywhere in [lambda/app.py](lambda/app.py), and press F5 → *Pytest: Current File*. The handler executes in-process with all of Powertools' real machinery (resolver routing, middleware order, idempotency wrapping, route-handler logic) — breakpoints, step-through, watch expressions, and exception inspection all work normally. The pytest fixtures in [tests/conftest.py](tests/conftest.py) build realistic API Gateway events, so the resolver sees the same shape it does in production.
+
+**What this covers.** Code-logic bugs in handlers, parsers, validators, idempotency keys, response shapes, exception paths, feature-flag evaluation — i.e. roughly 90% of what you actually need to debug.
+
+**What pytest debug cannot reproduce.** You're running in your local Python process, not a Lambda execution environment. The following are *only* observable on the deployed function:
+
+- Lambda runtime behavior — cold-start timing, init-phase code, the 250 MB unzipped package limit, the `/tmp` 512 MB cap, the configured memory ceiling.
+- IAM — your local AWS credentials are used, not the Lambda execution role. Permission denials in production won't surface locally.
+- Real AWS service calls — most unit tests mock boto3. Service-side behavior (DynamoDB throttling, SSM parameter resolution latency, AppConfig deployment cadence) is invisible.
+- Network and runtime context — VPC routing, Lambda layers, container reuse, environment variables injected by the deployed stack.
+
+**For the remaining 10%, debug on the deployed function.** The observability stack is built for this:
+
+- **Powertools `Logger`** writes structured JSON to CloudWatch Logs with a `correlation_id` injected from the API Gateway request ID. Filter Logs Insights by that ID to follow a single request end-to-end through every log line the handler emitted.
+- **X-Ray traces** (auto-enabled via Powertools `Tracer`) show the full call graph including SDK calls to DynamoDB, SSM, and AppConfig with per-segment timing. Use traces to spot cold-start init time, downstream latency, and IAM denials (which surface as red segments).
+- **CloudWatch RUM** correlates frontend requests to backend X-Ray traces via the `X-Amzn-Trace-Id` CORS header, so you can pivot from a slow user session to the matching backend trace.
+- **CloudWatch Metrics** (custom Powertools metrics + the `MonitoringFacade` dashboard) surface throttles, errors, and concurrency at the aggregate level.
+
+This combination is the standard professional workflow for serverless Python: local debug for logic, deployed observability for runtime behavior. The toolchain overhead of `sam local` is generally not worth it once Powertools' structured-logging + X-Ray story is in place.
 
 ## Deploy the application
 
