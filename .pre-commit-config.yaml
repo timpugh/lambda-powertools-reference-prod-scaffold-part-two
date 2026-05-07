@@ -32,14 +32,18 @@ repos:
         entry: mypy
         language: system
         types: [python]
-        # --show-traceback added 2026-05-07 to diagnose an INTERNAL ERROR that
-        # surfaces only on Linux CI runners (passes locally on macOS arm64).
-        # The crash started after bba3ba0 swapped this hook from mirrors-mypy
-        # to language:system — the venv-mode mypy now has access to every
-        # project dep including some pre-1.0 packages like zensical, and one
-        # of them is crashing mypy during import resolution. Remove this flag
-        # once the underlying bug is identified and worked around.
-        args: [--ignore-missing-imports, --show-traceback]
+        args: [--ignore-missing-imports]
+        # By default pre-commit forks the hook across several worker processes
+        # (one per CPU) and partitions files between them. mypy 1.20+ uses an
+        # SQLite-backed incremental cache (.mypy_cache/<py>/cache.db) and the
+        # parallel workers hit it concurrently — on 2-CPU CI runners they
+        # deterministically lock-contend and one process crashes with
+        # `OperationalError: database is locked`, which mypy reports as
+        # INTERNAL ERROR. Local 8+ CPU machines retry the lock fast enough
+        # that the symptom hides. require_serial=true forces pre-commit to
+        # run mypy in a single worker, so cache access is sequential and the
+        # lock never contends.
+        require_serial: true
         # scripts/generate_openapi.py imports from lambda/app.py (Powertools),
         # which conflicts with aws-cdk-lib on `attrs`. Pre-commit hooks run
         # in .venv (CDK side); scripts/ is checked via `make typecheck`
