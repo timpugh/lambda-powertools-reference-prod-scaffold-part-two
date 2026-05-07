@@ -17,7 +17,6 @@ This project contains source code and supporting files for a serverless applicat
 - `hello_world/hello_world_frontend_stack.py` - The frontend stack (S3 + CloudFront)
 - `hello_world/nag_utils.py` - Shared cdk-nag rule-pack helper (`apply_compliance_aspects`) and suppression list for CDK-managed singleton Lambdas
 - `frontend/` - Static assets (`index.html`) deployed to the frontend S3 bucket
-- `events/event.json` - A sample API Gateway proxy event for local SAM invocation
 - `tests/` - Unit and integration tests
 - `tests/conftest.py` - Shared test fixtures (API Gateway event, Lambda context, mocks)
 - `docs/` - Zensical documentation source files
@@ -401,22 +400,7 @@ cdk synth
 cdk synth
 ```
 
-You can invoke the Lambda function locally using the SAM CLI with the synthesized template:
-
-```bash
-sam local invoke HelloWorldFunction -t cdk.out/HelloWorld.template.json --event events/event.json
-```
-
-`events/event.json` is a sample API Gateway REST proxy event that simulates a `GET /hello` request. It includes realistic headers, a `requestContext` with a unique `requestId` (used by idempotency), and placeholder CloudFront fields. Use it as a starting point for local invocation — edit the `httpMethod`, `path`, or `body` fields to test different scenarios.
-
-You can also emulate the API locally:
-
-```bash
-sam local start-api -t cdk.out/HelloWorld.template.json
-curl http://localhost:3000/hello
-```
-
-**Note:** Local invocation requires a container runtime to be running. The SAM CLI uses whichever one the host provides — Docker Desktop, the Docker engine, or Finch (via `finch vm start`).
+For local *invocation* of the Lambda handler, use the pytest-driven debug flow described in [Debugging the Lambda function](#debugging-the-lambda-function) — `sam local invoke` is intentionally not used by this project (the unpinned `debugpy` it injects conflicts with the project's `--require-hashes` install mode for `lambda/requirements.txt`).
 
 ## Fetch, tail, and filter Lambda function logs
 
