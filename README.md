@@ -195,7 +195,7 @@ To use the CDK, you need the following tools.
 
 * [Node.js](https://nodejs.org/) - Required to install the CDK CLI (`npm install -g aws-cdk`)
 * AWS CDK CLI - [Install the CDK CLI](https://docs.aws.amazon.com/cdk/v2/guide/getting-started.html)
-* AWS SAM CLI - [Install the SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-install.html) - Required for local invocation and log tailing
+* AWS CLI v2 - [Install the AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) - Used by `aws logs tail` for streaming Lambda logs (see [Fetch, tail, and filter Lambda function logs](#fetch-tail-and-filter-lambda-function-logs)). The CDK CLI also relies on the same AWS credentials the AWS CLI configures.
 * [Python 3 installed](https://www.python.org/downloads/)
 * [uv](https://docs.astral.sh/uv/) — Python package and environment manager (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
 * A container runtime for bundling Lambda dependencies — either of:
@@ -404,13 +404,25 @@ For local *invocation* of the Lambda handler, use the pytest-driven debug flow d
 
 ## Fetch, tail, and filter Lambda function logs
 
-You can use the SAM CLI to fetch logs from your deployed Lambda function:
+The AWS CLI `logs tail` command streams a CloudWatch log group directly — no SAM CLI dependency. Get the function's log group from the backend stack outputs (or look it up in the AWS Console under the Lambda's *Monitor* tab):
 
 ```bash
-sam logs -n HelloWorldFunction --stack-name "HelloWorld" --tail
+# Tail the live stream (Ctrl+C to stop)
+aws logs tail /aws/lambda/HelloWorld-us-east-1-AppHelloWorldFunction... --follow
+
+# Filter for errors only
+aws logs tail /aws/lambda/HelloWorld-us-east-1-AppHelloWorldFunction... --follow \
+    --filter-pattern '{ $.level = "ERROR" }'
+
+# Tail with a JMESPath filter, picking out one structured field per line
+aws logs tail /aws/lambda/HelloWorld-us-east-1-AppHelloWorldFunction... --follow \
+    --format short \
+    --filter-pattern '{ $.correlation_id = "abc-123" }'
 ```
 
-This works for any AWS Lambda function, not just ones deployed with SAM. See the [SAM CLI logging documentation](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-logging.html) for more on filtering and searching logs.
+The Lambda's `logging_format=JSON` config makes every line valid JSON, which `--filter-pattern` queries against directly using [CloudWatch metric-filter syntax](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/FilterAndPatternSyntax.html). Pair with [Powertools' `correlation_id` injection](https://docs.powertools.aws.dev/lambda/python/latest/core/logger/#setting-a-correlation-id) to follow a single request end-to-end across all the structured log entries it produced.
+
+For richer ad-hoc queries (joins across log groups, percentile aggregations, time-series visualizations), use [CloudWatch Logs Insights](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/AnalyzingLogData.html) in the AWS Console — the WAF stack already pre-creates three saved queries (see [WAF rules](#waf-rules)) as a model for how to wire those into CDK.
 
 ## Add a resource to your application
 
