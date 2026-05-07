@@ -83,12 +83,15 @@ cdk-deprecations: ## List every deprecated CDK API used by any stack (synth outp
 deploy: ## Deploy all stacks to us-east-1 (use `cdk deploy '**' -c region=X` for other regions)
 	cdk deploy '**' --require-approval never
 
-# `cdk destroy '**'` interactively confirms before deleting each stack;
-# answer 'y' to proceed or pass --force to skip the prompt. Three stacks
-# are destroyed independently — WAF first (no dependents), then backend
-# and frontend in parallel.
-destroy: ## Destroy all stacks in us-east-1 (use `cdk destroy '**' -c region=X` for other regions)
-	cdk destroy '**'
+# --force skips the interactive "are you sure?" prompt, mirroring how
+# the deploy target uses --require-approval never. Without --force, the
+# command fails outright in non-TTY contexts (CI, background shells)
+# with "terminal is not attached so we are unable to get a confirmation".
+# If you want the confirmation back for a one-off run, invoke cdk
+# directly: `cdk destroy '**'`. Three stacks are destroyed independently
+# — frontend first (consumes the WAF ARN), then backend and WAF.
+destroy: ## Destroy all stacks in us-east-1 (use `cdk destroy '**' --force -c region=X` for other regions)
+	cdk destroy '**' --force
 
 lint: ## Run all pre-commit hooks (ruff, mypy, pylint, bandit, xenon, pip-audit)
 	uv run pre-commit run --all-files
