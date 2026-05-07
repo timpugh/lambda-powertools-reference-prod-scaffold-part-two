@@ -32,7 +32,14 @@ repos:
         entry: mypy
         language: system
         types: [python]
-        args: [--ignore-missing-imports]
+        # --show-traceback added 2026-05-07 to diagnose an INTERNAL ERROR that
+        # surfaces only on Linux CI runners (passes locally on macOS arm64).
+        # The crash started after bba3ba0 swapped this hook from mirrors-mypy
+        # to language:system — the venv-mode mypy now has access to every
+        # project dep including some pre-1.0 packages like zensical, and one
+        # of them is crashing mypy during import resolution. Remove this flag
+        # once the underlying bug is identified and worked around.
+        args: [--ignore-missing-imports, --show-traceback]
         # scripts/generate_openapi.py imports from lambda/app.py (Powertools),
         # which conflicts with aws-cdk-lib on `attrs`. Pre-commit hooks run
         # in .venv (CDK side); scripts/ is checked via `make typecheck`
