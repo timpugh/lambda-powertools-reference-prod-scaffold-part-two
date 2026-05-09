@@ -216,7 +216,6 @@ env = [
     "POWERTOOLS_SERVICE_NAME=hello-world",
     "POWERTOOLS_METRICS_NAMESPACE=HelloWorld",
     "POWERTOOLS_LOG_LEVEL=INFO",
-    "LOG_LEVEL=INFO",
     "IDEMPOTENCY_TABLE_NAME=test-idempotency",
     "GREETING_PARAM_NAME=/test/greeting",
     "APPCONFIG_APP_NAME=test-app",

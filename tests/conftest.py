@@ -53,12 +53,18 @@ def apigw_event():
 
 @pytest.fixture
 def lambda_context(mocker):
-    """Mock Lambda context using pytest-mock."""
+    """Mock Lambda context using pytest-mock.
+
+    ``get_remaining_time_in_millis`` returns a concrete int because Powertools'
+    idempotency layer calls it to compute a remaining-execution timedelta;
+    a MagicMock would propagate into ``timedelta(milliseconds=...)`` and raise.
+    """
     context = mocker.MagicMock()
     context.function_name = "HelloWorldFunction"
     context.memory_limit_in_mb = 128
     context.invoked_function_arn = "arn:aws:lambda:us-east-1:123456789012:function:HelloWorldFunction"
     context.aws_request_id = "test-request-id"
+    context.get_remaining_time_in_millis.return_value = 30_000
     return context
 
 

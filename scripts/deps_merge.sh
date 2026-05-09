@@ -85,7 +85,18 @@ process_pr() {
     local pr=$1
     blue "=== PR #$pr ==="
 
-    git checkout main >/dev/null 2>&1
+    # Refuse to operate on a dirty tree — `git checkout main` would silently
+    # leave us on the wrong branch, after which `make lock` would regenerate
+    # files against the wrong base and the force-push would clobber the PR.
+    if [ -n "$(git status --porcelain)" ]; then
+        red "Working tree is dirty. Commit or stash before running. Skipping PR #$pr."
+        return 1
+    fi
+
+    if ! git checkout main >/dev/null 2>&1; then
+        red "Could not check out main. Skipping PR #$pr."
+        return 1
+    fi
     git pull origin main --quiet
 
     if ! gh pr checkout "$pr" >/dev/null 2>&1; then
@@ -110,17 +121,28 @@ process_pr() {
     fi
 
     yellow "  Running ruff format..."
-    uv run ruff format . >/dev/null 2>&1 || true
+    if ! uv run ruff format . >/dev/null 2>&1; then
+        red "  ruff format failed — skipping. Inspect locally."
+        return 1
+    fi
 
-    # Commit only if there's actually drift to capture
+    # Commit only if there's actually drift to capture. If a commit attempt
+    # fails (typically a pre-commit hook flagging the regenerated artefacts),
+    # surface the failure rather than force-pushing whatever is staged.
     if ! git diff --quiet --exit-code || ! git diff --staged --quiet --exit-code; then
         git add uv.lock lambda/requirements.txt 2>/dev/null || true
         git add -u 2>/dev/null || true
-        git commit -m "chore: regenerate lockfile and run ruff format" >/dev/null 2>&1 || true
+        if ! git commit -m "chore: regenerate lockfile and run ruff format" >/dev/null 2>&1; then
+            red "  git commit failed (pre-commit hook?). Skipping PR."
+            return 1
+        fi
     fi
 
     yellow "  Force-pushing..."
-    if ! git push --force-with-lease origin "$branch" >/dev/null 2>&1; then
+    # --force-if-includes (Git 2.30+) closes a window in plain --force-with-lease
+    # where a fetch between checkout and push could let a concurrent push slip
+    # under the lease check.
+    if ! git push --force-with-lease --force-if-includes origin "$branch" >/dev/null 2>&1; then
         red "  Push failed — skipping (remote may have moved)."
         return 1
     fi

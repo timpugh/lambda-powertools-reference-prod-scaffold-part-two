@@ -32,8 +32,16 @@ sys.path.insert(0, str(REPO_ROOT / "lambda"))
 # Importing app.py instantiates a DynamoDB client for the idempotency layer,
 # which requires a region. We never make a real AWS call here — we only
 # introspect the resolver — so a dummy region satisfies botocore without
-# touching any real environment.
+# touching any real environment. The required-env-var checks in app.py
+# (``_require_env``) raise at import time when any of these are missing,
+# so we seed every one with a non-empty placeholder. Real deployments get
+# real values from the CDK Lambda environment block.
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
+os.environ.setdefault("IDEMPOTENCY_TABLE_NAME", "openapi-generator-placeholder")
+os.environ.setdefault("GREETING_PARAM_NAME", "/openapi-generator/placeholder")
+os.environ.setdefault("APPCONFIG_APP_NAME", "openapi-generator-placeholder")
+os.environ.setdefault("APPCONFIG_ENV_NAME", "openapi-generator-placeholder")
+os.environ.setdefault("APPCONFIG_PROFILE_NAME", "openapi-generator-placeholder")
 
 # Import must follow sys.path mutation so the lambda/ directory is importable.
 # pylint: disable=wrong-import-position

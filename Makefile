@@ -56,7 +56,10 @@ test-cdk: ## Run CDK stack assertion tests (uses .venv — needs CDK)
 	uv run pytest tests/cdk -v --override-ini="addopts=" --timeout=120
 
 test-integration: ## Run integration tests against a deployed stack (uses .venv-lambda)
-	$(LAMBDA_RUN) pytest tests/integration -v
+	# --override-ini drops the project-wide --cov-fail-under=100 gate (which
+	# only makes sense for unit tests over lambda/) so integration tests don't
+	# fail the run on coverage instead of behavior. Mirrors test-cdk's pattern.
+	$(LAMBDA_RUN) pytest tests/integration -v --override-ini="addopts="
 
 # =============================================================================
 # Code quality
@@ -151,7 +154,10 @@ docs-serve: ## Regenerate OpenAPI spec and start the Zensical dev server with ho
 #
 # Override at the command line: `make upgrade COOLDOWN_DAYS=14`.
 COOLDOWN_DAYS ?= 7
-COOLDOWN_CUTOFF := $(shell python3 -c 'from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=$(COOLDOWN_DAYS))).strftime("%Y-%m-%dT00:00:00Z"))')
+# Lazy ('=' not ':=') so the python3 subshell only runs when the recipe that
+# expands $(COOLDOWN_CUTOFF) actually fires. Otherwise every `make help` /
+# `make test` invocation pays the python startup cost up-front.
+COOLDOWN_CUTOFF = $(shell python3 -c 'from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) - timedelta(days=$(COOLDOWN_DAYS))).strftime("%Y-%m-%dT00:00:00Z"))')
 
 lock: ## Regenerate uv.lock and lambda/requirements.txt from pyproject.toml
 	uv lock

@@ -84,12 +84,13 @@ class HelloWorldStack(Stack):
         )
 
         # ── Singleton-scoped cdk-nag suppressions ───────────────────────────────
-        # CDK-managed singleton Lambdas (AwsCustomResource provider, LogRetention)
-        # are created at the stack level as siblings of the construct that
-        # requested them, not as children. ``suppress_cdk_singletons`` looks
+        # CDK-managed singleton Lambdas (currently just the AwsCustomResource
+        # provider) are created at the stack level as siblings of the construct
+        # that requested them, not as children. ``suppress_cdk_singletons`` looks
         # them up via ``try_find_child`` so the suppressions keep working
         # regardless of whether the stack is at the App root or nested inside
-        # a cdk.Stage.
+        # a cdk.Stage. (The LogRetention singleton was eliminated when log
+        # groups were made explicit via ``log_group=`` everywhere.)
         suppress_cdk_singletons(self, _CDK_SINGLETON_IDS)
 
         # ── Async failure destination for the AwsCustomResource provider ────────

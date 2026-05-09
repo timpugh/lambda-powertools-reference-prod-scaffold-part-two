@@ -69,8 +69,9 @@ def attach_async_failure_destination(
     """
     singleton = scope.node.try_find_child(singleton_id)
     # IFunction is a JSII protocol that isn't runtime-checkable, so we check
-    # the concrete singleton-function classes that CDK actually instantiates.
-    if not isinstance(singleton, _lambda.SingletonFunction | _lambda.Function):
+    # the concrete Function class. SingletonFunction is a subclass, so the
+    # isinstance check covers both.
+    if not isinstance(singleton, _lambda.Function):
         return None
 
     dlq = sqs.Queue(

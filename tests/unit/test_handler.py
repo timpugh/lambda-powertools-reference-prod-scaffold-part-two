@@ -55,13 +55,15 @@ def test_ssm_failure_returns_500(apigw_event, lambda_context, lambda_app_module,
 def test_feature_flag_failure_falls_back_to_default(apigw_event, lambda_context, lambda_app_module, mocker):
     """Test that a feature flag evaluation failure falls back gracefully.
 
-    AppConfig failures are non-critical — the handler logs a warning and
-    uses the default value (False) rather than failing the whole request.
+    AppConfig failures are non-critical — the handler catches the Powertools
+    FeatureFlags exception types (StoreClientError covers boto3 / network
+    errors against the AppConfig data plane) and uses the default value
+    (False) rather than failing the whole request.
     """
     mocker.patch.object(
         lambda_app_module.feature_flags,
         "evaluate",
-        side_effect=Exception("AppConfig unavailable"),
+        side_effect=lambda_app_module.StoreClientError("AppConfig unavailable"),
     )
 
     ret = lambda_app_module.lambda_handler(apigw_event, lambda_context)
@@ -114,15 +116,58 @@ def test_missing_idempotency_key_returns_400(apigw_event, lambda_context, lambda
     assert "Idempotency-Key" in ret["body"]
 
 
-def test_lowercase_idempotency_key_accepted(apigw_event, lambda_context, lambda_app_module):
+def test_lowercase_idempotency_key_accepted(apigw_event, lambda_context, lambda_app_module, monkeypatch, mocker):
     """The JMESPath also matches a lowercase 'idempotency-key' header.
 
     HTTP headers are case-insensitive; API Gateway preserves the casing the
     caller sent. The OR fallback in the JMESPath covers the lowercase form.
+    POWERTOOLS_IDEMPOTENCY_DISABLED is unset for this test so the @idempotent
+    decorator actually evaluates the JMESPath rather than short-circuiting —
+    otherwise the test passes trivially regardless of which header is present.
+    The persistence layer's mutating methods are mocked to no-ops so the test
+    never touches DynamoDB; ``_get_remaining_time_in_millis`` is also patched
+    so Powertools doesn't try to compute a timedelta from a MagicMock context.
     """
+    monkeypatch.delenv("POWERTOOLS_IDEMPOTENCY_DISABLED", raising=False)
+    mocker.patch(
+        "aws_lambda_powertools.utilities.idempotency.base.IdempotencyHandler._get_remaining_time_in_millis",
+        return_value=30_000,
+    )
+    mocker.patch.object(lambda_app_module.persistence_layer, "_put_record", return_value=None)
+    mocker.patch.object(lambda_app_module.persistence_layer, "_get_record", side_effect=Exception("not found"))
+    mocker.patch.object(lambda_app_module.persistence_layer, "_update_record", return_value=None)
+    mocker.patch.object(lambda_app_module.persistence_layer, "_delete_record", return_value=None)
     del apigw_event["headers"]["Idempotency-Key"]
     apigw_event["headers"]["idempotency-key"] = "test-idempotency-key-lower"
 
     ret = lambda_app_module.lambda_handler(apigw_event, lambda_context)
 
     assert ret["statusCode"] == 200
+
+
+def test_persistence_layer_error_propagates(apigw_event, lambda_context, lambda_app_module, monkeypatch, mocker):
+    """A DynamoDB-side persistence failure does not get masked as a 400.
+
+    The outer handler intentionally only catches ``IdempotencyKeyError``
+    (which has a meaningful 400 mapping); persistence-layer failures
+    propagate up to the Lambda runtime instead, so the original exception
+    type surfaces in CloudWatch metrics and X-Ray rather than being silently
+    flattened into the generic 400 path. We assert the exception escapes
+    rather than being absorbed.
+    """
+    import pytest as _pytest
+    from aws_lambda_powertools.utilities.idempotency.exceptions import IdempotencyPersistenceLayerError
+
+    monkeypatch.delenv("POWERTOOLS_IDEMPOTENCY_DISABLED", raising=False)
+    mocker.patch(
+        "aws_lambda_powertools.utilities.idempotency.base.IdempotencyHandler._get_remaining_time_in_millis",
+        return_value=30_000,
+    )
+    mocker.patch.object(
+        lambda_app_module.persistence_layer,
+        "_put_record",
+        side_effect=IdempotencyPersistenceLayerError("DDB throttled", Exception("orig")),
+    )
+
+    with _pytest.raises(IdempotencyPersistenceLayerError):
+        lambda_app_module.lambda_handler(apigw_event, lambda_context)

@@ -177,8 +177,16 @@ celerybeat-schedule.*
 # SageMath parsed files
 *.sage.py
 
-# Environments
+# Environments + credential filenames (defense in depth — the project doesn't
+# generate any of these but accidentally committing one would be high-impact).
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials
+secrets.json
+aws-exports.json
 .venv
 .venv-*
 env/

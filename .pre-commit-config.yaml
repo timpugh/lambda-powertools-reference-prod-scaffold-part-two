@@ -7,14 +7,18 @@ repos:
   # ecosystem run cycles. Sourcing from the venv eliminates the drift surface.
   - repo: local
     hooks:
-      - id: ruff
-        name: ruff lint
-        entry: ruff check --fix --force-exclude
-        language: system
-        types: [python]
+      # Format first, then lint --fix. Per ruff's own recommendation: running
+      # the linter's auto-fixer after the formatter avoids a class of churn
+      # where the fixer rewrites code into a shape the formatter immediately
+      # rewrites again, forcing pre-commit to take a second pass.
       - id: ruff-format
         name: ruff format
         entry: ruff format --force-exclude
+        language: system
+        types: [python]
+      - id: ruff
+        name: ruff lint
+        entry: ruff check --fix --force-exclude
         language: system
         types: [python]
 

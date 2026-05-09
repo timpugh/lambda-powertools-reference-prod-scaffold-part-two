@@ -1,4 +1,4 @@
-from typing import Any, cast
+from typing import Any
 
 from aws_cdk import (
     CfnOutput,
@@ -512,9 +512,14 @@ class HelloWorldFrontendStack(Stack):
         # implicitly by Lambda and has no retention — it would dangle after
         # cdk destroy. We find the provider via the construct tree and create
         # an explicit log group so CloudFormation owns and deletes it.
-        auto_delete_provider = cast(
-            CustomResourceProvider,
-            self.node.try_find_child("Custom::S3AutoDeleteObjectsCustomResourceProvider"),
+        # The lookup is type-checked at runtime instead of cast-asserted: if
+        # CDK ever swaps the provider out for a non-CustomResourceProvider type
+        # the explicit isinstance() returns None and the log-group block is
+        # skipped, rather than letting a stale cast() lie its way into a
+        # service_token attribute access that would crash at synth time.
+        auto_delete_provider_node = self.node.try_find_child("Custom::S3AutoDeleteObjectsCustomResourceProvider")
+        auto_delete_provider = (
+            auto_delete_provider_node if isinstance(auto_delete_provider_node, CustomResourceProvider) else None
         )
         if auto_delete_provider is not None:
             # service_token is the Lambda ARN; index 6 of the colon-split is the function name
@@ -632,6 +637,21 @@ class HelloWorldFrontendStack(Stack):
             encryption=s3.BucketEncryption.S3_MANAGED,
             enforce_ssl=True,
             versioned=False,
+            # Bound the audit trail's storage growth. S3 data events fire on
+            # every Get/Put/Delete against the audited buckets and accumulate
+            # forever otherwise. 30 days matches a typical short-retention
+            # forensic window — production forks with compliance scope (HIPAA,
+            # PCI) should extend or replace this with an AWS Backup plan, and
+            # forks running CloudTrail Lake can drop the on-bucket trail
+            # entirely.
+            lifecycle_rules=[
+                s3.LifecycleRule(
+                    id="ExpireAfter30Days",
+                    enabled=True,
+                    expiration=Duration.days(30),
+                    abort_incomplete_multipart_upload_after=Duration.days(1),
+                ),
+            ],
             removal_policy=RemovalPolicy.DESTROY,
             auto_delete_objects=True,
         )
@@ -712,23 +732,30 @@ class HelloWorldFrontendStack(Stack):
         # cloudtrail.Trail L2 grants the cloudtrail.amazonaws.com principal
         # s3:GetBucketAcl + s3:PutObject without an aws:SourceArn condition,
         # so any CloudTrail trail in any AWS account that ever discovered this
-        # bucket name could in principle write to it. Adding an explicit Deny
-        # for the cloudtrail principal when aws:SourceArn doesn't match this
-        # trail closes the gap without needing to rebuild the L2-managed
-        # Allow statements. aws:SourceAccount is checked too as defense in
-        # depth (some legacy trail configurations omit aws:SourceArn).
+        # bucket name could in principle write to it. Adding two explicit Deny
+        # statements (one per condition key) closes the gap on either mismatch
+        # — if both keys lived in one StringNotEquals block IAM would AND them,
+        # so a malicious trail in the same account with a different name would
+        # match aws:SourceAccount and slip past. Splitting into two Denies gives
+        # the OR semantics we actually want.
+        ct_principals = [iam.ServicePrincipal("cloudtrail.amazonaws.com")]
+        ct_resources = [cloudtrail_log_bucket.bucket_arn, cloudtrail_log_bucket.arn_for_objects("*")]
         cloudtrail_log_bucket.add_to_resource_policy(
             iam.PolicyStatement(
                 effect=iam.Effect.DENY,
                 actions=["s3:GetBucketAcl", "s3:PutObject"],
-                principals=[iam.ServicePrincipal("cloudtrail.amazonaws.com")],
-                resources=[cloudtrail_log_bucket.bucket_arn, cloudtrail_log_bucket.arn_for_objects("*")],
-                conditions={
-                    "StringNotEquals": {
-                        "aws:SourceArn": trail_arn,
-                        "aws:SourceAccount": self.account,
-                    },
-                },
+                principals=ct_principals,
+                resources=ct_resources,
+                conditions={"StringNotEquals": {"aws:SourceArn": trail_arn}},
+            )
+        )
+        cloudtrail_log_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.DENY,
+                actions=["s3:GetBucketAcl", "s3:PutObject"],
+                principals=ct_principals,
+                resources=ct_resources,
+                conditions={"StringNotEquals": {"aws:SourceAccount": self.account}},
             )
         )
 

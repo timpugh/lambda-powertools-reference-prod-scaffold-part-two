@@ -22,6 +22,7 @@ nav = [
     { "Overview" = "index.md" },
     { "Code reference" = [
         { "Lambda handler" = "lambda_handler.md" },
+        { "Backend application construct" = "hello_world_app.md" },
         { "Backend stack" = "cdk_stack.md" },
         { "WAF stack" = "hello_world_waf_stack.md" },
         { "Frontend stack" = "hello_world_frontend_stack.md" },

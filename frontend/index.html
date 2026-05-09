@@ -113,9 +113,9 @@
   <div class="card">
     <h1>Hello World</h1>
     <p class="subtitle">Serverless reference architecture &mdash; Lambda + API Gateway + CloudFront</p>
-    <button id="btn">Call API</button>
-    <div class="spinner" id="spinner"></div>
-    <div class="response" id="response"></div>
+    <button id="btn" type="button">Call API</button>
+    <div class="spinner" id="spinner" role="progressbar" aria-label="Loading"></div>
+    <div class="response" id="response" role="status" aria-live="polite"></div>
   </div>
 
   <script>
@@ -135,7 +135,16 @@
 
       try {
         const apiUrl = await getApiUrl();
-        const res    = await fetch(`${apiUrl}hello`);
+        // Idempotency-Key is required by the Lambda — Powertools' @idempotent
+        // layer keys on this header to deduplicate retries. crypto.randomUUID()
+        // gives a fresh key per click so each user-initiated call is treated
+        // as a distinct logical operation; a real client should reuse the same
+        // key across automatic retries of the same logical request instead.
+        // apiUrl from API Gateway ends in "/", so strip it before joining.
+        const base   = apiUrl.replace(/\/$/, "");
+        const res    = await fetch(`${base}/hello`, {
+          headers: { "Idempotency-Key": crypto.randomUUID() },
+        });
         const data   = await res.json();
 
         response.textContent      = data.message ?? JSON.stringify(data);

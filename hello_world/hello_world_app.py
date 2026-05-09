@@ -159,8 +159,9 @@ class HelloWorldApp(Construct):
             type="AWS.AppConfig.FeatureFlags",
         )
 
-        # Initial feature flags configuration
-        app_config_version = appconfig.CfnHostedConfigurationVersion(  # noqa: F841
+        # Initial feature flags configuration. CFN registration runs as a
+        # side effect of construction, so no variable binding is needed.
+        appconfig.CfnHostedConfigurationVersion(
             self,
             "FeatureFlagsVersion",
             application_id=self.app_config_app.ref,
@@ -173,7 +174,7 @@ class HelloWorldApp(Construct):
             ),
         )
 
-        # Explicit Lambda log group with 30-day retention (implicit group has no retention).
+        # Explicit Lambda log group with 1-week retention (implicit group has no retention).
         # log_group_name omitted — CDK auto-generates a unique name and wires it into the
         # Lambda function via the log_group property below.
         lambda_log_group = logs.LogGroup(
@@ -208,9 +209,13 @@ class HelloWorldApp(Construct):
                 "POWERTOOLS_LOG_LEVEL": "INFO",
                 "IDEMPOTENCY_TABLE_NAME": self.idempotency_table.table_name,
                 "GREETING_PARAM_NAME": self.greeting_param.parameter_name,
-                "APPCONFIG_APP_NAME": f"{stack.stack_name}-features",
-                "APPCONFIG_ENV_NAME": f"{stack.stack_name}-env",
-                "APPCONFIG_PROFILE_NAME": f"{stack.stack_name}-features",
+                # Sourcing AppConfig identifiers from the CFN constructs (instead
+                # of re-formatting f"{stack.stack_name}-...") keeps the Lambda's
+                # reads in lockstep with the IAM grant below: any future rename
+                # of the AppConfig resources flows through .name automatically.
+                "APPCONFIG_APP_NAME": self.app_config_app.name,
+                "APPCONFIG_ENV_NAME": app_config_env.name,
+                "APPCONFIG_PROFILE_NAME": app_config_profile.name,
             },
         )
 
@@ -241,7 +246,7 @@ class HelloWorldApp(Construct):
             )
         )
 
-        # Explicit API Gateway access log group with 30-day retention.
+        # Explicit API Gateway access log group with 1-week retention.
         # log_group_name omitted — CDK auto-generates and passes it into the
         # RestApi via LogGroupLogDestination below.
         api_log_group = logs.LogGroup(
@@ -304,7 +309,10 @@ class HelloWorldApp(Construct):
             # X-Amzn-Trace-Id is required for CloudWatch RUM to propagate the
             # client-side X-Ray trace header into the API Gateway → Lambda
             # segments so the browser and backend appear on the same trace.
-            allow_headers=[*apigw.Cors.DEFAULT_HEADERS, "X-Amzn-Trace-Id"],
+            # Idempotency-Key must be allowed by the preflight or browsers will
+            # block the actual request — the Lambda requires it (returns 400
+            # without it) so the preflight has to permit it explicitly.
+            allow_headers=[*apigw.Cors.DEFAULT_HEADERS, "X-Amzn-Trace-Id", "Idempotency-Key"],
         )
 
         # Explicit execution log group — API Gateway creates this outside CloudFormation
@@ -358,7 +366,9 @@ class HelloWorldApp(Construct):
         # destroy time so no dashboard is left behind after cdk destroy.
         # Policy is scoped to the exact dashboard ARN — CloudWatch dashboards have
         # a known global ARN format and the name is fixed by the resource group.
-        app_insights_dashboard_arn = f"arn:{stack.partition}:cloudwatch::{stack.account}:dashboard/{resource_group.name}"
+        app_insights_dashboard_arn = (
+            f"arn:{stack.partition}:cloudwatch::{stack.account}:dashboard/{resource_group.name}"
+        )
         app_insights_dashboard_cleanup = cr.AwsCustomResource(
             self,
             "AppInsightsDashboardCleanup",
