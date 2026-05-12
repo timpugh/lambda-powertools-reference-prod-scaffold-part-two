@@ -57,7 +57,7 @@ from cdk_monitoring_constructs import DefaultDashboardFactory, MonitoringFacade
 from cdk_nag import NagSuppressions
 from constructs import Construct
 
-from hello_world.nag_utils import grant_logs_service_to_key
+from hello_world.nag_utils import grant_guardduty_service_to_key, grant_logs_service_to_key
 
 
 class HelloWorldApp(Construct):
@@ -94,6 +94,20 @@ class HelloWorldApp(Construct):
         # log-group ARNs in this account+region. See ``grant_logs_service_to_key``
         # in ``nag_utils.py`` — three CMKs in this project share the statement.
         grant_logs_service_to_key(
+            self.encryption_key,
+            region=stack.region,
+            account=stack.account,
+            partition=stack.partition,
+        )
+        # GuardDuty Lambda Protection inspects Lambda function config, including
+        # CMK-encrypted env vars. Without this grant the service role is denied
+        # kms:Decrypt and GuardDuty's coverage of this Lambda is incomplete.
+        # Scoped via aws:SourceAccount + aws:SourceArn to this account+region's
+        # detectors only. Applied to the backend CMK only because that's the
+        # key encrypting the Lambda — the frontend and WAF CMKs encrypt log
+        # groups and an S3 bucket that GuardDuty does not currently inspect
+        # through this key.
+        grant_guardduty_service_to_key(
             self.encryption_key,
             region=stack.region,
             account=stack.account,

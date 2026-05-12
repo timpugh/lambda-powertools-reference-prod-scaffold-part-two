@@ -68,6 +68,34 @@ def grant_logs_service_to_key(key: kms.Key, *, region: str, account: str, partit
     )
 
 
+def grant_guardduty_service_to_key(key: kms.Key, *, region: str, account: str, partition: str) -> None:
+    """Grant GuardDuty ``kms:Decrypt`` on a CMK so Lambda Protection can introspect.
+
+    GuardDuty Lambda Protection (and similar foundational-detection features)
+    needs to read Lambda function configuration — including env vars encrypted
+    with a customer-managed key. Without this grant the assumed
+    ``AWSServiceRoleForAmazonGuardDuty`` role is denied ``kms:Decrypt`` against
+    the CMK, leaving GuardDuty's coverage of CMK-encrypted resources incomplete
+    (the original CloudTrail finding that motivated this grant).
+
+    Scoped to GuardDuty detectors in this account+region only via
+    ``aws:SourceAccount`` and ``aws:SourceArn`` — the cross-account
+    confused-deputy guard AWS documents for service-principal grants.
+    """
+    key.add_to_resource_policy(
+        iam.PolicyStatement(
+            sid="AllowGuardDutyDecrypt",
+            actions=["kms:Decrypt"],
+            principals=[iam.ServicePrincipal("guardduty.amazonaws.com")],
+            resources=["*"],
+            conditions={
+                "StringEquals": {"aws:SourceAccount": account},
+                "ArnLike": {"aws:SourceArn": f"arn:{partition}:guardduty:{region}:{account}:detector/*"},
+            },
+        )
+    )
+
+
 def attach_async_failure_destination(
     scope: IConstruct,
     singleton_id: str,
