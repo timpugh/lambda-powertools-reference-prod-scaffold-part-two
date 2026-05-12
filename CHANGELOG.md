@@ -1,0 +1,199 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.0.0] - 2026-05-12
+
+### Added
+
+- Add error handling for SSM and AppConfig failures
+- Implement implicit CDK resources explicitly
+- Take ownership of API Gateway execution log group in CloudFormation
+- Add CloudFront + S3 + WAF frontend stack (#5)
+- Extract WAF into its own stack with cross-region reference support (#7)
+- Region-scoped stack names for fully independent multi-region deployments
+- Add meaningful CloudFormation outputs to all three stacks
+- Auto-delete Application Insights dashboard on cdk destroy
+- Add ServerlessChecks and NIST80053R5Checks cdk-nag rule packs
+- Encrypt data at rest with CMK, enable WAF logging, API GW caching, S3 logging
+- Add CDK synth CI, stack assertion tests, frontend integration tests, and complete Sphinx docs
+- Enable 5 template-changing CDK context flags and document NIST skip
+- Enable remaining IAM policy CDK flags (minimizePolicies + createNewPolicies)
+- Upgrade Lambda runtime to Python 3.13
+- Enable CloudFront access logging and standardize on Python 3.13
+- Expand API Gateway access log format with account, stage, and error fields
+- Add CloudWatch Logs Insights saved queries for Lambda, API Gateway, and WAF
+- Add Athena + Glue analytics for CloudFront and S3 access logs
+- Add three S3 access log saved queries (slow, 403, object reads)
+- Add Pydantic validation with build-time OpenAPI docs
+- Migrate docs from Sphinx to Zensical with mkdocstrings
+- Enable tables markdown extension
+- Default Scalar code samples to Python requests
+- Add HIPAA Security and PCI DSS 3.2.1 cdk-nag rule packs
+- Inject uniform x-amazon-apigateway-integration into OpenAPI spec
+- Add multi-root workspace for dual-venv Pylance resolution
+- Add CloudWatch RUM with X-Ray correlation
+- Add custom events, extended metrics, and session attributes
+- Round of cross-service hardening across Lambda, DDB, S3, Glue, WAF
+- CMK-encrypt AppConfig hosted configuration
+
+### Build
+
+- Migrate from pip-tools to uv with dependency groups
+- Bump pytest-randomly from 4.0.1 to 4.1.0 (#38)
+- Bump pre-commit from 4.5.1 to 4.6.0 in the linting group across 1 directory (#42)
+- Cdk-synth target descends into Stage-nested stacks
+- Tighten typecheck, lock installs, add deploy/destroy
+- Route make security pip-audit through pre-commit
+- Add deps-merge target to automate Dependabot maintainer flow
+- Fix deps_merge.sh for bash 3.2 (macOS default)
+- Bump zensical from 0.0.37 to 0.0.40 in the patches group (#50)
+
+### CI/CD
+
+- Add GitHub Actions workflows, branch protection, and pre-commit integration
+- Add Dependabot for GitHub Actions version updates
+- Auto-merge Dependabot GitHub Actions PRs when CI passes
+- Extend Dependabot to pip and document the constraint chain
+- Install pytest-timeout in cdk-check job
+- Group Dependabot pip updates to reduce PR volume and prevent skew
+- Add Dependabot cooldown windows to dodge freshly-yanked malware
+- SHA-pin every GitHub Action to defend against tag hijacks
+- Restrict Dependabot auto-merge to patch/minor GitHub Actions updates
+- Scope every workflow to least-privilege permissions and add local pip cooldown
+- Detect lambda/requirements.txt drift from uv.lock
+- Fail on lock drift and prune uv cache
+- Auto-merge patch/minor uv updates alongside GitHub Actions
+- Ignore unfixable pip CVE-2026-3219; accept pip ecosystem in auto-merge
+- Gate Dependabot auto-merge on PR author, not latest actor
+- Skip commit-signature check in auto-merge workflow
+- Register arm64 QEMU handler before cdk synth
+- Add --show-traceback to mypy hook to diagnose Linux crash
+
+### Changed
+
+- Initial commit: serverless Hello World with AWS Lambda Powertools
+- Revert "chore(vscode): wire up AWS Toolkit local-invoke + debug for Lambda"
+
+### Documentation
+
+- Add CI, Python, and docs badges to README
+- Add __init__ docstring and clean up autodoc directives
+- Expand pyproject.toml comments and README documentation
+- Use pip install -r for test deps locally to avoid venv corruption
+- Document Dependabot and auto-merge workflow in README
+- Document conventional commit message convention
+- Add quick start, make shortcuts, design decisions, and cdk.out note
+- Document error handling pattern in design decisions
+- Add TODO.md tracking production improvements not yet implemented
+- Document explicit resource ownership pattern to prevent dangling resources
+- Document bootstrap requirement per region and multi-region deploy commands
+- Document Application Insights dashboard as known dangling resource exception
+- Update README to reflect encryption, WAF logging, caching, and outputs
+- Update TODO.md to reflect completed WAF, CDK synth CI, and add CORS item
+- Bring README in sync with current project state
+- Document the Dependabot gotchas learned from the first batch
+- Expand the honeytokens note in the supply-chain hardening section
+- Bring README in sync with workflow permissions and cooldown changes
+- Document Docker as a supported container runtime alongside Finch
+- Add CDK context flags section and pre-commit version sync note
+- Add observability section and update logging documentation
+- Enrich spec with operation metadata and templated server
+- Note Scalar defaultHttpClient configuration in README
+- Track TLS 1.2+ enforcement gap on CloudFront and API Gateway
+- Document HIPAA Security and PCI DSS 3.2.1 cdk-nag packs
+- Describe HelloWorldApp construct, logical-ID stability tests, and generated resource names
+- Note the x-amazon-apigateway-integration post-processor in the OpenAPI section
+- Note that OpenAPI integration injection is automatic for new routes
+- Cite the CDK best-practice sources the README applies
+- Note --locked and uv cache prune in CI description
+- Add scaling + post-deployment operations sections
+- Align README with current Makefile + auto-merge workflow
+- Document Lambda debug workflow via pytest
+- Refresh stale line refs and input-validation wording
+- Migrate log-tailing to aws logs tail, drop SAM CLI prereq
+- Restructure into 9 umbrella sections
+- Track deferred audit findings as official TODO items
+- Document the rest of the implemented audit decisions
+- Add TOC, tighten prose across every section
+- Reorder for first-time-reader flow
+- Document GuardDuty CMK grant, AppConfig CMK, synth glob
+- Add production readiness checklist + branch protection + multi-region
+
+### Fixed
+
+- Pip-sync in docs workflow, pin mypy deps, expand autodoc mocks
+- Move dummy-variable-rgx to lint section; apply ruff PT001 fixes; patch CVE-2026-39892
+- Replace deprecated pointInTimeRecovery with pointInTimeRecoverySpecification
+- Pin both stacks to us-east-1 in app.py (#6)
+- Remove SAM prefix from Application Insights resource group name
+- Scope all resource names to stack for multi-region deployment consistency
+- Update integration tests for region-scoped stack names
+- Handle missing Outputs key in frontend fixture and drop unresolvable CloudFront TLS assertion
+- Grant CloudWatch Logs service principal access to frontend KMS key
+- Sync pre-commit hook versions and add safe CDK context flags
+- Enable ACL ownership on access log bucket for CloudFront logging
+- Generate OpenAPI spec before sphinx-build in Docs workflow
+- Set dummy AWS region in OpenAPI generator
+- Run cdk app through uv so .venv interpreter is used
+- Audit each dependency group in its own pip-audit call
+- Suppress inline-policy findings on RumUnauthenticatedRole
+- Make extended metrics actually register
+- Use real AntiDDoSRuleSet rule group with default actions
+- Add required ManagedRuleGroupConfig for AntiDDoSRuleSet
+- Grant cloudtrail.amazonaws.com KMS encrypt access
+- Decouple CloudFront cache invalidation from BucketDeployment
+- Serialize mypy hook to avoid SQLite cache lock contention
+- Make all CI gates green
+- Suppress findings introduced by the async DLQ + KMS grants
+- Make cdk synth descend into Stage-nested stacks
+- Silence two CloudTrail noise sources
+
+### Maintenance
+
+- Add Apache 2.0 license
+- Add Makefile with common development commands
+- Reduce log group retention from 1 month to 1 week
+- Add .claude/ to .gitignore
+- Clean up pyproject.toml and remove inline noqa comments from test_stacks
+- Add test-cdk and cdk-synth targets to Makefile
+- Sync pre-commit hook versions with requirements.in and add hello_world to xenon
+- Add VS Code settings for ruff, mypy, pylint and recommended extensions
+- Surface CDK deprecations and notices, document detection approaches
+- Add launch.json for F5 debugging
+- Tighten Pylance settings, debug configs, and editor docs
+- Consolidate transitive deps via uv lock --upgrade
+- Wire up AWS Toolkit local-invoke + debug for Lambda
+- Pass --force to cdk destroy in the make target
+- Remove events/ folder and SAM local-invoke example
+- Tighten CMK boundary, IAM scoping, WAF rules, and env-var safety
+- Act on AWS public-doc audit — idempotency, DLQ, KMS, CloudTrail
+- Act on full project audit — 27 fixes across code, tests, CI, docs
+- Prepare v1.0 — metadata, license SPDX, pre-commit safety nets
+
+### Refactored
+
+- Move IAM and Lambda cdk-nag suppressions from stack-wide to per-resource
+- Rename AWS_SAM_*_STACK_NAME env vars to drop the misleading SAM prefix
+- Use typed AccessLogField references for API Gateway access log format
+- Render OpenAPI with Redoc standalone (pinned + SRI)
+- Switch OpenAPI renderer from Redoc to Scalar
+- Extract HelloWorldApp construct and lock in stateful logical IDs
+- Wrap stacks in cdk.Stage and document cdk.context.json policy
+
+### Removed
+
+- Remove Glue Data Catalog encryption (high cost, low value)
+- Remove AntiDDoSRuleSet (high cost, low value at this scale)
+
+### Tests
+
+- Add error case unit tests for SSM failure, unknown route, and unsupported method
+- Separate CDK tests from unit tests so cdk-check CI job stops failing
+
+[1.0.0]: https://github.com/timpugh/lambda-powertools-reference/tree/v1.0.0
+
+<!-- generated by git-cliff -->
