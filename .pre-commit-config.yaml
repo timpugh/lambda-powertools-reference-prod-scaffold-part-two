@@ -78,6 +78,12 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
       - id: check-json
+      # Safety nets added for v1.0 — all zero-config, near-zero runtime.
+      - id: check-toml                     # validates pyproject.toml syntax
+      - id: detect-private-key             # blocks accidental SSH / TLS key commits
+      - id: check-merge-conflict           # blocks unresolved <<<<<<< markers
+      - id: check-added-large-files        # blocks committing large binaries
+      - id: check-executables-have-shebangs # catches missing shebangs (scripts/deps_merge.sh, etc.)
 
   - repo: local
     hooks:

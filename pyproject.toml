@@ -1,15 +1,20 @@
 [project]
 name = "hello-world"
-version = "0.1.0"
+version = "1.0.0"
+description = "Production-grade AWS CDK reference architecture for Lambda + Powertools serverless applications, with multi-rule-pack cdk-nag, WAF, CloudTrail data events, CMK encryption end-to-end, and supply-chain hygiene."
 requires-python = ">=3.13"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "Apache-2.0"
 # No runtime dependencies at the project level — see [dependency-groups] below.
 # The project splits into two resolution environments because CDK and Powertools
 # require incompatible `attrs` versions (CDK pulls attrs<26 via jsii, Powertools
 # pulls attrs>=26). [tool.uv.conflicts] below declares the `lambda` and `cdk`
 # groups as mutually exclusive so uv locks both resolutions in one uv.lock.
 dependencies = []
+
+[project.urls]
+Repository = "https://github.com/timpugh/lambda-powertools-reference"
+Issues = "https://github.com/timpugh/lambda-powertools-reference/issues"
 
 # =============================================================================
 # Dependency groups (PEP 735) — resolved together by `uv lock`, installed
