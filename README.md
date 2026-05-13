@@ -37,7 +37,7 @@ This application provisions Lambda, API Gateway, DynamoDB, SSM Parameter Store, 
 - [Getting started](#getting-started) — [Prerequisites](#prerequisites) · [Quick start](#quick-start) · [Makefile](#makefile) · [Editor setup (VS Code)](#editor-setup-vs-code)
 - [Architecture](#architecture) — [Lambda Powertools features](#lambda-powertools-features) · [AWS resources provisioned](#aws-resources-provisioned) · [Stack and construct composition](#stack-and-construct-composition) · [Frontend stack](#frontend-stack) · [Monitoring](#monitoring)
 - [Deploy the application](#deploy-the-application) — [Recommended order](#recommended-order-for-ongoing-deploys) · [Different region](#deploying-to-a-different-region) · [Destroying](#destroying-a-deployment) · [Cleanup](#cleanup)
-- [Working in the codebase](#working-in-the-codebase) — [Add a resource](#add-a-resource-to-your-application) · [Useful CDK commands](#useful-cdk-commands) · [Synthesize and validate locally](#synthesize-and-validate-locally) · [Debugging the Lambda function](#debugging-the-lambda-function) · [Fetch, tail, and filter logs](#fetch-tail-and-filter-lambda-function-logs) · [Commit message convention](#commit-message-convention) · [Documentation](#documentation)
+- [Working in the codebase](#working-in-the-codebase) — [Add a resource](#add-a-resource-to-your-application) · [Useful CDK commands](#useful-cdk-commands) · [Synthesize and validate locally](#synthesize-and-validate-locally) · [Debugging the Lambda function](#debugging-the-lambda-function) · [Fetch, tail, and filter logs](#fetch-tail-and-filter-lambda-function-logs) · [Commit message convention](#commit-message-convention) · [Cutting a release](#cutting-a-release) · [Documentation](#documentation)
 - [Quality and security](#quality-and-security) — [Tests](#tests) · [Linting and static analysis](#linting-and-static-analysis) · [Detecting deprecated APIs](#detecting-deprecated-apis) · [Pre-commit hooks](#pre-commit-hooks) · [Security](#security) · [CDK security checks](#cdk-security-checks) · [pyproject.toml configuration](#pyprojecttoml-configuration)
 - [CI/CD](#cicd) — [GitHub Actions](#github-actions)
 - [Project dependencies](#project-dependencies)
@@ -633,6 +633,46 @@ type: short description
 The committed history is the input to **[git-cliff](https://github.com/orhun/git-cliff)** (config in [`cliff.toml`](cliff.toml)), which generates [`CHANGELOG.md`](CHANGELOG.md) by mapping these types into [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) groups (Added / Fixed / Documentation / CI/CD / Refactored / Tests / Removed / Maintenance / etc.). Regenerate after each release with `git cliff -o CHANGELOG.md`; for an unreleased section against `HEAD` prepend it with `git cliff --unreleased --prepend CHANGELOG.md`. Dependabot bumps (`build(deps):` / `chore(deps):` / bare `Bump X from Y to Z`) and `Merge pull request` commits are filtered out by `cliff.toml` so the changelog reflects feature / fix / docs / CI history rather than dependency churn.
 
 Forks that want to *enforce* the convention at author time (rather than rely on the reviewer + pre-commit gates) can adopt **[Commitizen](https://github.com/commitizen-tools/commitizen)** as an interactive authoring helper — it prompts for type/scope/description and refuses to create commits that don't conform. Intentionally not wired into this project because the convention is short enough to author by hand and the existing pre-commit hooks catch the common drift sources; meaningful in larger teams where conformance otherwise erodes.
+
+### Cutting a release
+
+Releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and are driven from the conventional-commit history. The end-to-end recipe:
+
+```bash
+# 1. Ask git-cliff what version to bump to based on commits since the last tag
+git cliff --bumped-version
+
+# 2. Bump pyproject.toml to that version, regenerate the lockfiles
+sed -i '' 's/^version = ".*"/version = "X.Y.Z"/' pyproject.toml
+make lock
+
+# 3. Regenerate the changelog (treats unreleased commits as if tagged X.Y.Z)
+git cliff --tag vX.Y.Z -o CHANGELOG.md
+
+# 4. Commit everything in one chore commit
+git add pyproject.toml uv.lock CHANGELOG.md
+git commit -m "chore: release vX.Y.Z"
+
+# 5. Tag with annotated release notes — the body shows up on the Releases page
+git tag -a vX.Y.Z -m "vX.Y.Z — short title
+
+Longer release notes here..."
+
+# 6. Push the commit and the tag
+git push origin main
+git push origin vX.Y.Z
+
+# 7. Publish the GitHub Release (pulls notes from the annotated tag)
+gh release create vX.Y.Z --notes-from-tag --latest --verify-tag
+```
+
+A few non-obvious details:
+
+- **`git cliff --bumped-version`** reads conventional-commit types since the last tag and follows SemVer: `feat:` triggers a minor bump, `fix:` a patch, `docs`/`chore`/`ci` etc. stay at patch. Breaking changes (`!` or `BREAKING CHANGE:` footer) trigger a major bump. v1.0.1 was chosen this way — only `docs:` commits since v1.0.0, so `--bumped-version` returned `v1.0.1`.
+- **`make lock`** regenerates `uv.lock` and `lambda/requirements.txt` so the lockfile records the new project version. The only diff in `uv.lock` is the one-line `version =` field for this project; transitive pins do not move.
+- **`git cliff --tag vX.Y.Z -o CHANGELOG.md`** regenerates the *entire* `CHANGELOG.md` rather than prepending — this keeps the footer URL list (`[X.Y.Z]: .../compare/..`) consistent across releases. The cost is rewriting unchanged previous sections; in practice that's a no-op since the content is deterministic.
+- **`--notes-from-tag`** on `gh release create` pulls the annotated tag body into the GitHub Release object, so the same release notes are available via `git show vX.Y.Z`, the GitHub web UI, and the Releases API without duplicating them.
+- **`--verify-tag`** rejects the call if the tag doesn't exist on origin, catching the "forgot to `git push origin vX.Y.Z`" case before it creates an orphan Release.
 
 ### Documentation
 
