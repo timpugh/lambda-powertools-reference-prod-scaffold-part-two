@@ -79,6 +79,7 @@ Common commands are available via `make`. Run `make help` to see all targets:
 
 ```bash
 make install            # set up both venvs (.venv + .venv-lambda) and pre-commit hooks
+make doctor             # diagnostic snapshot — uv/cdk/drawio versions, venv state, pre-commit wiring
 make test               # run unit tests with coverage (in .venv-lambda)
 make test-cdk           # run CDK stack assertion tests (in .venv)
 make test-integration   # run integration tests (requires deployed stack)
@@ -97,8 +98,13 @@ make docs-serve         # regenerate OpenAPI + start Zensical dev server with ho
 make lock               # regenerate uv.lock and lambda/requirements.txt from pyproject.toml
 make upgrade            # upgrade all dependencies (respects COOLDOWN_DAYS, default 7)
 make deps-merge         # process every open Dependabot PR (rebase + lock + push + arm auto-merge); use PR=N for one
-make clean              # remove build artifacts, caches, and coverage files
+make clean              # remove build artifacts, caches, and coverage files (preserves venvs)
+make clean-venvs        # wipe .venv and .venv-lambda (separate from `clean` — reinstalling takes minutes)
 ```
+
+**Virtual environments are project-local.** Both `.venv` (CDK workstation) and `.venv-lambda` (Lambda runtime) live at the repo root, are gitignored, and are created automatically by `make install`. You do not pick the location — `uv` does, based on the directory `make` runs from. Each clone of this repo gets its own pair; nothing is shared across projects on disk. The `attrs` version conflict between CDK (requires `attrs<26` via jsii) and Powertools (requires `attrs>=26`) is the reason two venvs exist; both resolutions are recorded in one `uv.lock` via `[tool.uv.conflicts]` in `pyproject.toml`. The Makefile's `LAMBDA_ENV := UV_PROJECT_ENVIRONMENT=.venv-lambda` variable + `$(LAMBDA_RUN)` prefix mean every target that needs Powertools auto-switches without an activation dance.
+
+Run `make doctor` after `make install` to confirm both venvs picked up the expected groups (`aws-cdk` in `.venv`, `aws-lambda-powertools` in `.venv-lambda`), and to verify `cdk` / `drawio` CLIs are on `PATH` and that pre-commit is wired into `.git/hooks/`. If a venv ever ends up corrupted (lockfile resolver refuses to reconcile, Python version mismatch, mysteriously-missing modules), `make clean-venvs && make install` is the cheapest path back to a known-good state.
 
 ### Editor setup (VS Code)
 
