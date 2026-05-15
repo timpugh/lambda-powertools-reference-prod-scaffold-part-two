@@ -331,6 +331,7 @@ class HelloWorldFrontendStack(Stack):
         rum_extended_metrics = self._wire_rum_metrics_extras(
             rum_app_monitor, rum_monitor_name, rum_monitor_arn, custom_resource_log_group
         )
+        self._wire_rum_log_group_cleanup(rum_app_monitor, rum_monitor_name, custom_resource_log_group)
 
         # ── Deploy frontend assets ───────────────────────────────────────────
         # Uploads frontend/ to S3 and generates config.json with the API URL
@@ -900,6 +901,70 @@ class HelloWorldFrontendStack(Stack):
                 apply_to_children=True,
             )
         return rum_extended_metrics
+
+    def _wire_rum_log_group_cleanup(
+        self,
+        rum_app_monitor: rum.CfnAppMonitor,
+        rum_monitor_name: str,
+        custom_resource_log_group: logs.LogGroup,
+    ) -> None:
+        """Delete the RUM-auto-created CloudWatch Logs group at stack destroy.
+
+        CloudWatch RUM creates a log group at
+        ``/aws/vendedlogs/RUMService_{monitor-name}{first-8-hex-of-monitor-id}``
+        the first time it ingests an event. That log group is owned by this
+        account but created outside CloudFormation, so ``cdk destroy`` deletes
+        the AppMonitor without touching the log group — same dangling-resource
+        shape as the Application Insights dashboard that
+        ``AppInsightsDashboardCleanup`` in the backend stack solves.
+
+        ``ResourceNotFoundException`` is ignored so destroy succeeds even when
+        no events were ever ingested (the log group only materializes on the
+        first event — common in CI / dev / no-traffic deploys).
+        """
+        monitor_id_prefix = Fn.select(0, Fn.split("-", rum_app_monitor.attr_id))
+        log_group_name = Fn.join("", [f"/aws/vendedlogs/RUMService_{rum_monitor_name}", monitor_id_prefix])
+        log_group_arn = Fn.join(
+            "",
+            [
+                f"arn:{self.partition}:logs:{self.region}:{self.account}:log-group:/aws/vendedlogs/RUMService_{rum_monitor_name}",
+                monitor_id_prefix,
+                ":*",
+            ],
+        )
+        cleanup = cr.AwsCustomResource(
+            self,
+            "RumLogGroupCleanup",
+            on_delete=cr.AwsSdkCall(
+                service="CloudWatchLogs",
+                action="deleteLogGroup",
+                parameters={"logGroupName": log_group_name},
+                physical_resource_id=cr.PhysicalResourceId.of("RumLogGroupCleanup"),
+                ignore_error_codes_matching="ResourceNotFoundException",
+            ),
+            policy=cr.AwsCustomResourcePolicy.from_sdk_calls(resources=[log_group_arn]),
+            install_latest_aws_sdk=False,
+            log_group=custom_resource_log_group,
+        )
+        # The implicit attr_id reference already forces this dependency at the
+        # CFN level; add_dependency makes the intent visible in code.
+        cleanup.node.add_dependency(rum_app_monitor)
+
+        # Matches the IAMNoInlinePolicy suppression pattern on the other RUM CRs
+        # in this stack — CDK generates the handler's policy inline.
+        reason = (
+            "Single least-privilege inline policy attached to the CDK AwsCustomResource handler — "
+            "scoped to logs:DeleteLogGroup on one log-group ARN; managed-policy reuse adds nothing"
+        )
+        NagSuppressions.add_resource_suppressions(
+            cleanup,
+            [
+                {"id": "NIST.800.53.R5-IAMNoInlinePolicy", "reason": reason},
+                {"id": "HIPAA.Security-IAMNoInlinePolicy", "reason": reason},
+                {"id": "PCI.DSS.321-IAMNoInlinePolicy", "reason": reason},
+            ],
+            apply_to_children=True,
+        )
 
     def _create_athena_glue_resources(self, access_log_bucket: s3.Bucket, encryption_key: kms.Key) -> None:
         """Create Glue catalog tables and Athena workgroup for CloudFront/S3 access log analytics."""

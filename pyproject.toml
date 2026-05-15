@@ -182,7 +182,7 @@ disable = [
 
 [tool.pylint.format]
 max-line-length = 120  # must match [tool.ruff] line-length above
-max-module-lines = 1300  # CDK frontend stack legitimately exceeds default 1000 — many resources, each with its own nag suppressions, plus the audit-pass additions (KMS confused-deputy guards, CloudTrail bucket Deny, async DLQ wiring, etc.)
+max-module-lines = 1400  # CDK frontend stack legitimately exceeds default 1000 — many resources, each with its own nag suppressions, plus the audit-pass additions (KMS confused-deputy guards, CloudTrail bucket Deny, async DLQ wiring, RUM log-group cleanup CR, etc.)
 
 # Structural complexity thresholds — pylint fails if any function or class exceeds these.
 # Complexity is also enforced via the xenon pre-commit hook.
