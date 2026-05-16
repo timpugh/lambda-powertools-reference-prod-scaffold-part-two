@@ -956,12 +956,26 @@ class HelloWorldFrontendStack(Stack):
             "Single least-privilege inline policy attached to the CDK AwsCustomResource handler — "
             "scoped to logs:DeleteLogGroup on one log-group ARN; managed-policy reuse adds nothing"
         )
+        # AwsSolutions-IAM5 fires because the log-group ARN ends in `:*`, which
+        # is the standard CloudWatch Logs log-stream wildcard required by every
+        # log-group resource ARN per the IAM docs — there is no way to grant
+        # logs:DeleteLogGroup on a log group without the `:*` suffix. The
+        # resource is otherwise fully scoped to one specific log group (path
+        # built from this monitor's runtime-resolved ID prefix), so the
+        # wildcard portion only authorizes log-stream-scope wildcards within
+        # that one log group, not across log groups.
+        iam5_reason = (
+            "Log-group ARN includes the standard :* log-stream wildcard suffix — required for any "
+            "CloudWatch Logs resource ARN per the IAM service authorization docs. The resource is "
+            "otherwise scoped to one specific log group built from the monitor's runtime-resolved ID."
+        )
         NagSuppressions.add_resource_suppressions(
             cleanup,
             [
                 {"id": "NIST.800.53.R5-IAMNoInlinePolicy", "reason": reason},
                 {"id": "HIPAA.Security-IAMNoInlinePolicy", "reason": reason},
                 {"id": "PCI.DSS.321-IAMNoInlinePolicy", "reason": reason},
+                {"id": "AwsSolutions-IAM5", "reason": iam5_reason, "applies_to": ["Resource::*"]},
             ],
             apply_to_children=True,
         )
