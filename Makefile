@@ -28,6 +28,7 @@ LAMBDA_RUN := $(LAMBDA_ENV) uv run
 
 .PHONY: help install install-cdk install-lambda doctor test test-cdk test-integration \
 	lint format typecheck security cdk-synth cdk-notices cdk-deprecations \
+	cdk-ls cdk-diff cdk-drift cdk-diagnose cdk-gc cdk-rollback \
 	deploy destroy docs docs-open docs-serve lock upgrade deps-merge clean clean-venvs
 
 help: ## Show this help message
@@ -118,6 +119,56 @@ cdk-notices: ## Show AWS-published CDK notices (CVEs, deprecated CDK versions, u
 
 cdk-deprecations: ## List every deprecated CDK API used by any stack (synth output filtered for "deprecated")
 	cdk synth '**' 2>&1 | grep -i deprecat || echo "No deprecated CDK APIs in use"
+
+cdk-ls: ## List all CDK stacks (uses '**' to descend into Stage-nested stacks)
+	# Without '**', `cdk ls` stops at the top-level Stage manifest and
+	# prints nothing useful. With it, the three nested stacks (Backend,
+	# WAF, Frontend) are listed — handy as a sanity check after stack-graph
+	# refactors or when verifying the Stage wiring is intact.
+	cdk ls '**'
+
+cdk-diff: ## Preview infra changes against deployed stacks (requires AWS credentials)
+	# Same Stage-nesting trap as cdk-synth and deploy: bare `cdk diff`
+	# walks only the App's direct children and reports no changes for the
+	# three real stacks. Use this as the pre-PR companion to cdk-synth —
+	# synth tells you cdk-nag is happy, diff tells you what would deploy.
+	cdk diff '**'
+
+cdk-drift: ## Detect drift between deployed resources and what CDK last shipped (requires AWS credentials)
+	# Surfaces resources mutated outside CDK — console edits, manual SDK
+	# calls, neighbor-stack collisions. Load-bearing for this template's
+	# encryption posture: CMK key policies, IAM grants, and CloudTrail
+	# trail config are easy to silently drift and easy to miss.
+	cdk drift '**'
+
+cdk-diagnose: ## Root-cause CloudFormation failures with construct paths and source locations (CDK 2.1120.0+)
+	# The --unstable=diagnose flag gates the command while it's behind the
+	# unstable feature flag; drop the flag once it graduates to stable.
+	# Output maps CFN errors back to the construct and the file:line where
+	# it was defined — designed to be parseable by AI agents as well as
+	# humans. Substitute a specific stack name for '**' to narrow scope.
+	cdk --unstable=diagnose diagnose '**'
+
+cdk-gc: ## Inspect (dry-run) unused Lambda/Docker assets in the CDK bootstrap S3/ECR repos
+	# Every `cdk deploy` adds new Lambda zips and container images to the
+	# CDKToolkit bootstrap bucket and ECR repo, but older revisions
+	# accumulate forever. --action=print is dry-run only — it tags isolated
+	# assets and reports what *would* be deleted on a subsequent run, but
+	# deletes nothing. To actually GC, run `cdk --unstable=gc gc` directly:
+	# the default (--action=full, --confirm=true) prompts interactively
+	# before each deletion. --created-buffer-days=1 (default) skips assets
+	# younger than a day; tune via --created-buffer-days=N for tighter
+	# windows. The --unstable=gc flag gates the command while gc is behind
+	# the unstable feature flag; drop it once gc graduates to stable.
+	cdk --unstable=gc gc --action=print
+
+cdk-rollback: ## Roll deployed stacks back to their last stable state (use after a partial deploy failure)
+	# Pairs with cdk-diagnose: when a deploy half-fails and CloudFormation
+	# parks a stack in UPDATE_ROLLBACK_FAILED, this returns it to the
+	# last good state without manual console intervention. Same '**' trap
+	# as cdk-synth and friends — bare `cdk rollback` only sees the empty
+	# Stage manifest.
+	cdk rollback '**'
 
 # The '**' glob is required so CDK descends into the Stage-nested stacks —
 # without it `cdk deploy` only sees the empty Stage manifest and exits with
