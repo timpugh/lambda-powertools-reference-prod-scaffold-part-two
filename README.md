@@ -562,12 +562,15 @@ Every CDK operation against this project should go through `make`, not bare `cdk
 | Pre-deploy | `make cdk-deprecations` | List every deprecated CDK API in use across all stacks. |
 | Deploy | `make deploy` | Deploy all three stacks to us-east-1 (non-interactive — cdk-nag has already gated the change at synth). |
 | Post-deploy | `make cdk-drift` | Detect resources mutated outside CDK. Load-bearing for this template's encryption posture: CMK key policies, IAM grants, and CloudTrail trail config are easy to silently drift. |
+| Remediation | `make cdk-revert-drift` | Deploy *and* auto-revert any out-of-band drift back to the committed code (CloudFormation `REVERT_DRIFT` deployment mode; requires CDK CLI `2.1110.0+`). Opt-in companion to `make cdk-drift` — detect first, then revert. Kept separate from `make deploy` so it never silently undoes an emergency console change. |
 | Post-deploy | `make cdk-gc` | Dry-run garbage collection of unused Lambda/Docker assets in the CDKToolkit bootstrap S3 bucket and ECR repo. Runs behind `--unstable=gc` until the feature graduates. To actually delete, run `cdk --unstable=gc gc` directly (prompts interactively). |
 | Forensics | `make cdk-diagnose` | Root-cause a failed CloudFormation deploy by mapping CFN errors back to construct paths and source `file:line`. Requires the CDK CLI at `2.1120.0+`; runs behind `--unstable=diagnose` until the feature graduates. |
 | Recovery | `make cdk-rollback` | Roll stacks back to their last stable state when a deploy parks them in `UPDATE_ROLLBACK_FAILED`. Pairs with `cdk-diagnose`: find the cause, then roll back. |
 | Teardown | `make destroy` | Destroy all stacks in us-east-1 (non-interactive — `--force` mirrors `--require-approval never` on deploy). |
 
 For different regions, invoke the CLI directly with the project's region context flag: `cdk deploy '**' -c region=ap-southeast-1`. The `'**'` glob is still required.
+
+**Drift as a CI signal (future enhancement).** The detect → revert split above also enables a tighter pipeline pattern worth adopting later: run `cdk drift '**'` as a read-only CI step alongside `cdk diff` and surface its output as a pull-request comment, so reviewers see out-of-band changes next to the code diff; then have the deployment pipeline run `make cdk-revert-drift` in place of `make deploy` to close the loop and keep the deployed account converged on the committed code. This isn't wired into the `cdk-check` workflow today because drift detection needs AWS credentials and a live stack (the job only runs `cdk synth` + assertion tests), but it's a natural addition once the pipeline has deploy-time credentials.
 
 **Troubleshooting synth warnings.** When `make cdk-synth` surfaces a warning whose origin isn't obvious, re-run with `cdk synth '**' --trace` to print full stack traces for each warning back to the construct that emitted it. This is usually enough to identify which suppression or property to adjust without bisecting the stack graph by hand. `--trace` works on any synth-fronted subcommand (`synth`, `diff`, `ls`, `diagnose`, `drift`, `gc`).
 
