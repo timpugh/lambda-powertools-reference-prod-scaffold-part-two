@@ -72,12 +72,17 @@
     // makes the client attach an X-Amzn-Trace-Id header to outbound fetch()
     // calls so browser spans join the backend API Gateway + Lambda trace.
     (function () {
-      // Check r.ok before parsing: CloudFront maps 403/404 → /index.html (200) for
-      // SPA routing, so a missing/forbidden config.json (partial deploy, OAC
-      // misgrant, invalidation race) would otherwise return the HTML index page
-      // and r.json() would throw a confusing "Unexpected token '<'" SyntaxError.
+      // Check status AND content type before parsing. r.ok alone is not enough:
+      // CloudFront maps 403/404 → /index.html with a *200* for SPA routing, so a
+      // missing/forbidden config.json (partial deploy, OAC misgrant, invalidation
+      // race) arrives as a 200 HTML page and r.json() would throw a confusing
+      // "Unexpected token '<'" SyntaxError. The content-type guard catches that
+      // mapped case; the r.ok guard catches everything CloudFront doesn't map.
       const configPromise = fetch("/config.json").then(function (r) {
-        if (!r.ok) throw new Error("config.json fetch failed: " + r.status);
+        const ct = r.headers.get("content-type") || "";
+        if (!r.ok || ct.indexOf("application/json") === -1) {
+          throw new Error("config.json unavailable: " + r.status + " (" + ct + ")");
+        }
         return r.json();
       });
       window.__appConfigPromise = configPromise;
@@ -141,9 +146,13 @@
     async function getApiUrl() {
       // Reuse the promise the head IIFE created; the `??` fallback only fires if
       // that <head> script never ran (stripped / CSP-blocked / failed), in which
-      // case we fetch config.json ourselves with the same r.ok guard.
+      // case we fetch config.json ourselves with the same status + content-type
+      // guard (the SPA 403/404 → index.html mapping returns HTML with a 200).
       const cfg = await (window.__appConfigPromise ?? fetch("/config.json").then((r) => {
-        if (!r.ok) throw new Error("config.json fetch failed: " + r.status);
+        const ct = r.headers.get("content-type") || "";
+        if (!r.ok || ct.indexOf("application/json") === -1) {
+          throw new Error("config.json unavailable: " + r.status + " (" + ct + ")");
+        }
         return r.json();
       }));
       if (!cfg || typeof cfg.apiUrl !== "string" || !cfg.apiUrl) {

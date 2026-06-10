@@ -29,11 +29,14 @@ jobs:
       # The OpenAPI generator imports lambda/app.py (needs Powertools) and
       # Zensical is in the docs group (installed in .venv). Install both
       # environments so each step runs in the one that has its imports.
+      # --locked mirrors ci.yml and the Makefile: without it a stale uv.lock
+      # silently re-resolves in the published-Pages build — the one pipeline
+      # with no other gate on the dependency set.
       - name: Install Lambda env (for OpenAPI generation)
-        run: UV_PROJECT_ENVIRONMENT=.venv-lambda uv sync --only-group lambda --only-group test
+        run: UV_PROJECT_ENVIRONMENT=.venv-lambda uv sync --locked --only-group lambda --only-group test
 
       - name: Install CDK env (for Zensical build)
-        run: uv sync --group cdk --group docs
+        run: uv sync --locked --group cdk --group docs
 
       - name: Generate OpenAPI spec
         run: UV_PROJECT_ENVIRONMENT=.venv-lambda uv run python scripts/generate_openapi.py

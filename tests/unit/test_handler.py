@@ -149,13 +149,40 @@ def test_missing_idempotency_key_returns_400(apigw_event, lambda_context, lambda
 
     assert ret["statusCode"] == 400
     assert "Idempotency-Key" in ret["body"]
+    # The 400 is built by hand outside the Powertools resolver, so it must carry
+    # its own CORS header — without it, cross-origin browser callers (the
+    # CloudFront-hosted frontend) get an opaque CORS failure instead of the
+    # documented 400 body. Keep in sync with CORSConfig.allow_origin.
+    assert ret["headers"]["Access-Control-Allow-Origin"] == "*"
 
 
-def test_lowercase_idempotency_key_accepted(apigw_event, lambda_context, lambda_app_module, monkeypatch, mocker):
-    """The JMESPath also matches a lowercase 'idempotency-key' header.
+def test_missing_headers_object_returns_400(apigw_event, lambda_context, lambda_app_module, monkeypatch):
+    """An event with no headers map at all is rejected with 400, not a crash.
 
-    HTTP headers are case-insensitive; API Gateway preserves the casing the
-    caller sent. The OR fallback in the JMESPath covers the lowercase form.
+    Manual invocations (console test events, aws lambda invoke) can omit the
+    headers key entirely; the handler's header normalization must tolerate
+    that and the idempotency layer then rejects the key-less request cleanly.
+    """
+    monkeypatch.delenv("POWERTOOLS_IDEMPOTENCY_DISABLED", raising=False)
+    del apigw_event["headers"]
+
+    ret = lambda_app_module.lambda_handler(apigw_event, lambda_context)
+
+    assert ret["statusCode"] == 400
+
+
+@pytest.mark.parametrize(
+    "header_name",
+    ["idempotency-key", "Idempotency-Key", "IDEMPOTENCY-KEY", "Idempotency-keY"],
+)
+def test_idempotency_key_header_is_case_insensitive(
+    header_name, apigw_event, lambda_context, lambda_app_module, monkeypatch, mocker
+):
+    """Any casing of the Idempotency-Key header is accepted.
+
+    HTTP header names are case-insensitive (RFC 9110) and API Gateway preserves
+    the casing the caller sent, but JMESPath lookups are exact-match — so the
+    handler lowercases header keys before the idempotency layer sees the event.
     POWERTOOLS_IDEMPOTENCY_DISABLED is unset for this test so the @idempotent
     decorator actually evaluates the JMESPath rather than short-circuiting —
     otherwise the test passes trivially regardless of which header is present.
@@ -173,7 +200,7 @@ def test_lowercase_idempotency_key_accepted(apigw_event, lambda_context, lambda_
     mocker.patch.object(lambda_app_module.persistence_layer, "_update_record", return_value=None)
     mocker.patch.object(lambda_app_module.persistence_layer, "_delete_record", return_value=None)
     del apigw_event["headers"]["Idempotency-Key"]
-    apigw_event["headers"]["idempotency-key"] = "test-idempotency-key-lower"
+    apigw_event["headers"][header_name] = "test-idempotency-key-casing"
 
     ret = lambda_app_module.lambda_handler(apigw_event, lambda_context)
 

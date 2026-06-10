@@ -4,7 +4,7 @@ These tests require a deployed stack. They are skipped automatically when the
 stack cannot be found, so the standard ``pytest`` run (unit tests) stays green
 without a live deployment. To run integration tests explicitly:
 
-    pytest tests/integration/ -c region=us-east-1
+    make test-integration
 
 The stack name is read from the ``AWS_BACKEND_STACK_NAME`` environment variable
 (set in pyproject.toml). Override it for a different region:

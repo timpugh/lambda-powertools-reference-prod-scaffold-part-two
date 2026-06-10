@@ -53,9 +53,11 @@ from constructs import Construct
 
 from hello_world.nag_utils import (
     AWS_CUSTOM_RESOURCE_PROVIDER_ID,
+    BUCKET_DEPLOYMENT_PROVIDER_ID,
     CDK_LAMBDA_SUPPRESSIONS,
     apply_compliance_aspects,
     attach_async_failure_destination,
+    grant_cloudtrail_service_to_key,
     grant_logs_service_to_key,
     suppress_cdk_singletons,
 )
@@ -415,6 +417,15 @@ class HelloWorldFrontendStack(Stack):
         # config.json's contents, that path is covered because Source.json_data
         # writes config.json as part of the BucketDeployment asset, so its hash —
         # and thus this object key — changes when api_url changes.
+        #
+        # Rollback caveat (accepted): CloudFront treats a repeated CallerReference
+        # as an idempotent replay of the earlier invalidation, so rolling assets
+        # back to a previously deployed content hash reuses that deploy's
+        # CallerReference and NO new invalidation runs — viewers keep the
+        # rolled-back-FROM version cached until TTL expiry. A deploy-unique nonce
+        # would fix that but would also invalidate on every backend-only deploy,
+        # defeating the quota-saving design. After an asset rollback, run a manual
+        # invalidation (CloudFrontDistributionId output) if freshness matters.
         # object_keys is a CDK list-token, not a Python list — use Fn.select.
         cf_invalidation_call = cr.AwsSdkCall(
             service="CloudFront",
@@ -549,21 +560,32 @@ class HelloWorldFrontendStack(Stack):
         suppress_cdk_singletons(
             self,
             (
-                "Custom::CDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756C",
+                BUCKET_DEPLOYMENT_PROVIDER_ID,
                 AWS_CUSTOM_RESOURCE_PROVIDER_ID,
             ),
         )
 
-        # ── Async failure destination for the AwsCustomResource provider ────────
-        # See HelloWorldStack for the full rationale — CFN invokes the provider
+        # ── Async failure destinations for the CDK-managed provider Lambdas ─────
+        # See HelloWorldStack for the full rationale — CFN invokes the providers
         # async, and without on_failure a crashed provider's payload is lost.
-        # attach_async_failure_destination also emits a CfnOutput of the DLQ URL,
-        # so the returned queue is surfaced for operators rather than unused.
+        # Both stack-level Function-based singletons get the same treatment: the
+        # AwsCustomResource provider AND the BucketDeployment handler. (The S3
+        # auto-delete provider is a CustomResourceProvider, not a Function — its
+        # async config is not reachable through the L2, which is exactly what
+        # its Serverless-LambdaDLQ suppression in CDK_LAMBDA_SUPPRESSIONS
+        # documents.) attach_async_failure_destination also emits a CfnOutput of
+        # each DLQ URL, so the returned queues are surfaced for operators.
         self.cr_provider_dlq = attach_async_failure_destination(
             self,
             AWS_CUSTOM_RESOURCE_PROVIDER_ID,
             encryption_key=frontend_encryption_key,
             queue_id="AwsCustomResourceProviderDlq",
+        )
+        self.bucket_deployment_dlq = attach_async_failure_destination(
+            self,
+            BUCKET_DEPLOYMENT_PROVIDER_ID,
+            encryption_key=frontend_encryption_key,
+            queue_id="BucketDeploymentProviderDlq",
         )
 
         # minimizePolicies restructures the BucketDeployment handler's inline
@@ -629,7 +651,7 @@ class HelloWorldFrontendStack(Stack):
         if provider is not None:
             # service_token is the Lambda ARN; index 6 of the colon-split is the function name
             fn_name = Fn.select(6, Fn.split(":", provider.service_token))
-            logs.LogGroup(
+            log_group = logs.LogGroup(
                 self,
                 "AutoDeleteObjectsLogGroup",
                 log_group_name=Fn.join("", ["/aws/lambda/", fn_name]),
@@ -637,6 +659,18 @@ class HelloWorldFrontendStack(Stack):
                 retention=logs.RetentionDays.ONE_WEEK,
                 removal_policy=RemovalPolicy.DESTROY,
             )
+            # The provider logs on its CREATE invocation too (each bucket's
+            # auto-delete custom resource fires it during deploy). Without
+            # explicit ordering, that first invocation can race this LogGroup:
+            # Lambda implicitly creates the group on first write and the
+            # LogGroup CREATE then fails with "already exists". Order every
+            # bucket's auto-delete custom resource after the group so the
+            # CMK-encrypted, retention-bounded group always wins.
+            for child in self.node.children:
+                if isinstance(child, s3.Bucket):
+                    auto_delete_cr = child.node.try_find_child("AutoDeleteObjectsCustomResource")
+                    if auto_delete_cr is not None:
+                        auto_delete_cr.node.add_dependency(log_group)
         return provider
 
     def _build_response_headers_policy(self) -> cloudfront.ResponseHeadersPolicy:
@@ -733,29 +767,15 @@ class HelloWorldFrontendStack(Stack):
         Trail logs are stored in a dedicated bucket so the audit destination isn't itself
         among the audited resources.
         """
-        # CloudTrail needs explicit KMS grants on the encryption key to write
-        # encrypted log files. CDK's auto-grants from passing encryption_key=
-        # don't always extend to the cloudtrail service principal when the key
-        # is shared with other services (CloudWatch Logs, CloudFront, etc.),
-        # so add the principal explicitly here. Mirrors the existing logs/
-        # CloudFront grants on the same key.
-        # Confused-deputy guard: scope the CloudTrail principal grant to trails
-        # in this account. The trail name is generated by CDK so we use a wildcard
-        # ARN against the account; CloudTrail sets aws:SourceArn to the trail ARN
-        # on every encrypt call. aws:SourceAccount is checked too as defense in
-        # depth (some older trail integrations omit aws:SourceArn).
-        encryption_key.add_to_resource_policy(
-            iam.PolicyStatement(
-                actions=["kms:GenerateDataKey*", "kms:DescribeKey"],
-                principals=[iam.ServicePrincipal("cloudtrail.amazonaws.com")],
-                resources=["*"],
-                conditions={
-                    "StringEquals": {"aws:SourceAccount": self.account},
-                    "ArnLike": {
-                        "aws:SourceArn": f"arn:{self.partition}:cloudtrail:{self.region}:{self.account}:trail/*",
-                    },
-                },
-            )
+        # Confused-deputy-guarded CloudTrail service-principal grant on the CMK.
+        # Shared helper in nag_utils so all service-principal grants on the
+        # project's CMKs (logs, GuardDuty, CloudTrail) live in one module and
+        # stay in lockstep — see ``grant_cloudtrail_service_to_key``.
+        grant_cloudtrail_service_to_key(
+            encryption_key,
+            region=self.region,
+            account=self.account,
+            partition=self.partition,
         )
         cloudtrail_log_bucket = s3.Bucket(
             self,
@@ -898,7 +918,16 @@ class HelloWorldFrontendStack(Stack):
             include_global_service_events=False,
             is_multi_region_trail=False,
         )
-        s3_data_events_trail.add_s3_event_selector([cloudtrail.S3EventSelector(bucket=b) for b in audited_buckets])
+        # include_management_events=False keeps this trail scoped to its stated
+        # purpose: object-level S3 data events. The CDK default (True) would
+        # additionally record EVERY regional management event — a *second copy*
+        # in any account that already has a management trail, billed at
+        # $2/100k events, on every fork of this template. (read_write_type is
+        # left at its default so both data-event reads and writes are captured.)
+        s3_data_events_trail.add_s3_event_selector(
+            [cloudtrail.S3EventSelector(bucket=b) for b in audited_buckets],
+            include_management_events=False,
+        )
         # CDK creates the trail's CloudWatch Logs delivery role with an inline
         # default policy — same pattern as the Lambda service role; not
         # directly configurable.

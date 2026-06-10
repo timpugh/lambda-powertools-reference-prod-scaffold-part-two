@@ -64,8 +64,9 @@ metrics = Metrics()
 # starts returning throttling (429) responses; its token-bucket state is useful
 # here because the clients are module-scoped (constructed once below) and reused
 # across every warm invocation, so the limiter persists for the container's life.
-# max_attempts=4 is botocore's "retries AFTER the initial request" count, i.e. up
-# to 5 total attempts — comfortably inside the function's 10s timeout. Retrying is
+# max_attempts=4 is the TOTAL attempt budget in standard/adaptive modes (1 initial
+# request + up to 3 retries; only legacy mode counts retries-after-initial) —
+# comfortably inside the function's 10s timeout. Retrying is
 # safe because the write path (DynamoDB via @idempotent) is idempotent on the
 # client-supplied Idempotency-Key, and the SSM/AppConfig calls are reads. This
 # implements the AWS "retry with backoff" prescriptive-guidance pattern without
@@ -99,19 +100,22 @@ app = APIGatewayRestResolver(
 )
 
 # Idempotency setup.
-# Key on the client-supplied "Idempotency-Key" header (case-insensitive lookup
-# matches both "Idempotency-Key" and "idempotency-key"). raise_on_no_idempotency_key
-# turns a missing header into Powertools' IdempotencyKeyError, which the resolver
-# below converts into a 400 BadRequest — making the requirement enforced rather
-# than implicit. Keying on a client-controlled value (instead of the server-
-# generated requestContext.requestId, which changes on every retry) is what
-# actually makes the layer deduplicate.
+# Key on the client-supplied "Idempotency-Key" header. HTTP header names are
+# case-insensitive (RFC 9110) but JMESPath lookups are exact-match, so
+# lambda_handler lowercases all header keys before the @idempotent layer sees
+# the event — the JMESPath then only needs the single lowercase form instead of
+# enumerating casings. raise_on_no_idempotency_key turns a missing header into
+# Powertools' IdempotencyKeyError, which the resolver below converts into a 400
+# BadRequest — making the requirement enforced rather than implicit. Keying on a
+# client-controlled value (instead of the server-generated
+# requestContext.requestId, which changes on every retry) is what actually makes
+# the layer deduplicate.
 persistence_layer = DynamoDBPersistenceLayer(
     table_name=_require_env("IDEMPOTENCY_TABLE_NAME"),
     boto_config=boto_config,
 )
 idempotency_config = IdempotencyConfig(
-    event_key_jmespath='headers."Idempotency-Key" || headers."idempotency-key"',
+    event_key_jmespath='headers."idempotency-key"',
     raise_on_no_idempotency_key=True,
     expires_after_seconds=3600,
 )
@@ -276,6 +280,14 @@ def lambda_handler(event: dict[str, Any], context: LambdaContext) -> dict[str, A
     Returns:
         dict: API Gateway Lambda proxy response.
     """
+    # Header names are case-insensitive on the wire but the idempotency layer's
+    # JMESPath is exact-match, so normalize keys to lowercase once here. The
+    # resolver is unaffected — Powertools' event data classes already do
+    # case-insensitive header lookups. A copy (not in-place mutation) keeps the
+    # caller's event untouched. `or {}` covers manual invocations (console test
+    # events, aws lambda invoke) that omit the headers map entirely.
+    event = {**event, "headers": {k.lower(): v for k, v in (event.get("headers") or {}).items()}}
+
     # cast() restores the return type after @idempotent erases it. Powertools'
     # app.resolve() is well-typed in .venv-lambda, but the @idempotent wrapper
     # passes return values through as Any; .venv (CDK side, no Powertools)
@@ -286,7 +298,14 @@ def lambda_handler(event: dict[str, Any], context: LambdaContext) -> dict[str, A
         logger.warning("Request rejected: missing Idempotency-Key header")
         return {
             "statusCode": 400,
-            "headers": {"Content-Type": "application/json"},
+            # This response is built outside the Powertools resolver, so it must
+            # carry its own CORS header (the resolver adds one to every response
+            # it builds) — without it, cross-origin browsers can't read the 400
+            # body at all. Keep in sync with CORSConfig.allow_origin above.
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+            },
             "body": '{"message":"Idempotency-Key header is required"}',
             "isBase64Encoded": False,
         }

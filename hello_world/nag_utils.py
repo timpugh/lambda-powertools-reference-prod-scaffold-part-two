@@ -20,11 +20,12 @@ would break on the added Stage prefix).
 from collections.abc import Iterable
 from typing import cast
 
-from aws_cdk import Aspects, CfnOutput, Duration, RemovalPolicy, Stack
+from aws_cdk import Aspects, CfnOutput, Duration, Fn, RemovalPolicy, Stack
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_kms as kms
 from aws_cdk import aws_lambda as _lambda
 from aws_cdk import aws_lambda_destinations as destinations
+from aws_cdk import aws_logs as logs
 from aws_cdk import aws_sqs as sqs
 from aws_cdk import aws_wafv2 as wafv2
 from cdk_nag import (
@@ -37,12 +38,13 @@ from cdk_nag import (
 )
 from constructs import Construct, IConstruct
 
-# CDK-managed singleton Lambda construct ID for the AwsCustomResource provider.
-# Derived from CDK's own source hash; stable for years and unaffected by rescoping
-# stacks under a cdk.Stage. Shared here so the backend and frontend stacks — which
-# both suppress it AND attach an async DLQ to it via try_find_child — provably
-# reference the same construct ID rather than re-typing the literal at each site.
+# CDK-managed singleton Lambda construct IDs. Derived from CDK's own source
+# hashes; stable for years and unaffected by rescoping stacks under a cdk.Stage.
+# Shared here so the stacks that suppress these singletons AND attach async DLQs
+# to them via try_find_child provably reference the same construct ID rather
+# than re-typing the literal at each site.
 AWS_CUSTOM_RESOURCE_PROVIDER_ID = "AWS679f53fac002430cb0da5b7982bd2287"
+BUCKET_DEPLOYMENT_PROVIDER_ID = "Custom::CDKBucketDeployment8693BB64968944B69AAFB0CC9EB8756C"
 
 
 def apply_compliance_aspects(stack: Stack) -> None:
@@ -78,6 +80,52 @@ def grant_logs_service_to_key(key: kms.Key, *, region: str, account: str, partit
             },
         )
     )
+
+
+def grant_cloudtrail_service_to_key(key: kms.Key, *, region: str, account: str, partition: str) -> None:
+    """Grant CloudTrail the KMS operations needed to write CMK-encrypted trail log files.
+
+    CloudTrail needs explicit KMS grants on the encryption key to deliver
+    SSE-KMS log files. CDK's auto-grants from passing ``encryption_key=`` to
+    ``cloudtrail.Trail`` don't always extend to the cloudtrail service
+    principal when the key is shared with other services (CloudWatch Logs,
+    CloudFront, etc.), so the principal is added explicitly — mirroring the
+    logs/GuardDuty grants above so all service-principal statements on the
+    project's CMKs live in one module and stay in lockstep.
+
+    Confused-deputy guard: the grant is scoped to trails in this account. Trail
+    names are generated per stack, so the ``aws:SourceArn`` condition uses a
+    wildcard trail ARN for the account+region; CloudTrail sets aws:SourceArn to
+    the trail ARN on every encrypt call. ``aws:SourceAccount`` is checked too as
+    defense in depth (some older trail integrations omit aws:SourceArn).
+    """
+    key.add_to_resource_policy(
+        iam.PolicyStatement(
+            actions=["kms:GenerateDataKey*", "kms:DescribeKey"],
+            principals=[iam.ServicePrincipal("cloudtrail.amazonaws.com")],
+            resources=["*"],
+            conditions={
+                "StringEquals": {"aws:SourceAccount": account},
+                "ArnLike": {
+                    "aws:SourceArn": f"arn:{partition}:cloudtrail:{region}:{account}:trail/*",
+                },
+            },
+        )
+    )
+
+
+def waf_log_destination(log_group: logs.LogGroup) -> str:
+    """Return a log group's ARN in the format WAF logging requires (no ``:*`` suffix).
+
+    CloudWatch Logs' ``GetAtt Arn`` (and therefore CDK's ``log_group_arn``)
+    resolves to ``arn:...:log-group:<name>:*``, but the WAF developer guide
+    documents the CloudWatch Logs destination for ``PutLoggingConfiguration``
+    as the plain log-group ARN without the trailing ``:*`` — and WAF has
+    historically rejected the wildcard form with WAFInvalidParameterException
+    (aws/aws-cdk#18253). Both WebACLs in this project route through this helper
+    so neither drifts back to the raw ``GetAtt`` form.
+    """
+    return Fn.select(0, Fn.split(":*", log_group.log_group_arn))
 
 
 def grant_guardduty_service_to_key(key: kms.Key, *, region: str, account: str, partition: str) -> None:
@@ -121,11 +169,12 @@ def build_managed_threat_rules(metric_prefix: str) -> list[wafv2.CfnWebACL.RuleP
     exactly the kind of asymmetry this consolidation prevents.
 
     The rate-based rule is intentionally NOT part of this shared set. It belongs
-    only on the CLOUDFRONT ACL, where it aggregates by ``FORWARDED_IP`` because
-    CloudFront is the only client the edge sees. On the regional ACL guarding the
-    origin, every request also arrives from a CloudFront edge IP, so an
-    IP-aggregated limit would penalise legitimate funnelled traffic; origin-side
-    volume is bounded instead by API Gateway stage throttling and the function's
+    only on the CLOUDFRONT ACL, where it aggregates by plain ``IP``: a
+    CLOUDFRONT-scoped ACL inspects the *viewer* request, so the source IP it
+    sees is already the real client's. On the regional ACL guarding the origin,
+    every request arrives from a CloudFront edge IP, so an IP-aggregated limit
+    there would penalise legitimate funnelled traffic; origin-side volume is
+    bounded instead by API Gateway stage throttling and the function's
     reserved concurrency.
 
     Args:
@@ -176,7 +225,8 @@ def attach_async_failure_destination(
 ) -> sqs.Queue | None:
     """Wire an SQS DLQ to a CDK-managed async singleton Lambda.
 
-    AwsCustomResource provider Lambdas are invoked asynchronously by
+    CDK-managed provider Lambdas (the AwsCustomResource provider, the
+    BucketDeployment handler) are invoked asynchronously by
     CloudFormation during stack lifecycle events. Without an on_failure
     destination, a provider crash that exhausts Lambda's two automatic
     async retries is silently dropped — the stack rollback still surfaces
@@ -265,7 +315,7 @@ def attach_async_failure_destination(
     CfnOutput(
         cast(Construct, scope),
         f"{queue_id}Url",
-        description="SQS DLQ capturing failed async invocations of the AwsCustomResource provider Lambda",
+        description=f"SQS DLQ capturing failed async invocations of the {singleton_id} provider Lambda",
         value=dlq.queue_url,
     )
 

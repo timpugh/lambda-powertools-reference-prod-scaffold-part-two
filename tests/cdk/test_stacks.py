@@ -110,8 +110,13 @@ class TestWafStack:
 
     def test_webacl_has_rate_limiting_rule(self, waf_template: Template) -> None:
         # Assert the security-critical properties, not just the rule name: a
-        # regression flipping FORWARDED_IP→IP, MATCH→NO_MATCH, or Block→Count would
-        # silently weaken the per-client rate limit and cdk-nag does not check these.
+        # regression flipping IP→FORWARDED_IP or Block→Count would silently
+        # disable the per-client rate limit and cdk-nag does not check these.
+        # A CLOUDFRONT-scoped ACL inspects the *viewer* request, where the
+        # source IP already is the real client IP and X-Forwarded-For is
+        # normally absent — and per the WAF docs a missing header means the
+        # rule is skipped entirely (fallback behavior never fires), so a
+        # FORWARDED_IP aggregation here would make the rule a no-op.
         waf_template.has_resource_properties(
             "AWS::WAFv2::WebACL",
             {
@@ -125,11 +130,7 @@ class TestWafStack:
                                     "RateBasedStatement": Match.object_like(
                                         {
                                             "Limit": 200,
-                                            "AggregateKeyType": "FORWARDED_IP",
-                                            "ForwardedIPConfig": {
-                                                "HeaderName": "X-Forwarded-For",
-                                                "FallbackBehavior": "MATCH",
-                                            },
+                                            "AggregateKeyType": "IP",
                                         }
                                     )
                                 },
@@ -139,6 +140,25 @@ class TestWafStack:
                 )
             },
         )
+        # Belt-and-braces: no rule in the edge ACL may carry a ForwardedIPConfig.
+        for acl in waf_template.find_resources("AWS::WAFv2::WebACL").values():
+            assert "ForwardedIPConfig" not in json.dumps(acl["Properties"].get("Rules", []), default=str)
+
+    def test_webacl_log_destination_has_no_wildcard_suffix(self, waf_template: Template) -> None:
+        # CDK's log_group_arn resolves to "...:log-group:<name>:*", but the WAF
+        # dev guide documents the CloudWatch Logs destination as the plain
+        # log-group ARN without the trailing ":*". The stack must normalize the
+        # ARN (Fn::Select over Fn::Split on ":*") rather than pass GetAtt raw.
+        configs = waf_template.find_resources("AWS::WAFv2::LoggingConfiguration")
+        assert configs, "expected a WAF LoggingConfiguration"
+        for config in configs.values():
+            destination = json.dumps(config["Properties"]["LogDestinationConfigs"][0], default=str)
+            failure_hint = (
+                "WAF log destination must strip the :* suffix from the log-group ARN "
+                "(Fn::Select 0 of Fn::Split ':*'), not pass the raw GetAtt Arn"
+            )
+            assert "Fn::Select" in destination, failure_hint
+            assert ":*" in destination, failure_hint
 
     def test_webacl_logging_targets_waf_log_group(self, waf_template: Template) -> None:
         # The LoggingConfiguration must reference an aws-waf-logs-* group and the WebACL.
@@ -260,6 +280,65 @@ class TestBackendStack:
                 ),
             },
         )
+
+    def test_appconfig_flags_are_deployed_to_environment(self, backend_template: Template) -> None:
+        # A hosted configuration version alone is never served: the AppConfig
+        # data plane (GetLatestConfiguration) only returns *deployed* config.
+        # Without a Deployment resource the enhanced_greeting flag can never
+        # evaluate true and every fetch takes the error-fallback path.
+        backend_template.resource_count_is("AWS::AppConfig::DeploymentStrategy", 1)
+        backend_template.resource_count_is("AWS::AppConfig::Deployment", 1)
+        backend_template.has_resource_properties(
+            "AWS::AppConfig::Deployment",
+            {
+                "ApplicationId": Match.any_value(),
+                "EnvironmentId": Match.any_value(),
+                "ConfigurationProfileId": Match.any_value(),
+                "ConfigurationVersion": Match.any_value(),
+                "DeploymentStrategyId": Match.any_value(),
+            },
+        )
+
+    def test_regional_waf_log_destination_has_no_wildcard_suffix(self, backend_template: Template) -> None:
+        # Same contract as the CloudFront ACL's logging config in the WAF stack:
+        # the WAF dev guide documents the CloudWatch Logs destination ARN without
+        # the trailing ":*" that CDK's log_group_arn carries.
+        configs = backend_template.find_resources("AWS::WAFv2::LoggingConfiguration")
+        assert configs, "expected the regional WAF LoggingConfiguration"
+        for config in configs.values():
+            destination = json.dumps(config["Properties"]["LogDestinationConfigs"][0], default=str)
+            failure_hint = "regional WAF log destination must strip the :* suffix from the log-group ARN"
+            assert "Fn::Select" in destination, failure_hint
+            assert ":*" in destination, failure_hint
+
+    def test_access_log_format_has_latency_and_no_message_string(self, backend_template: Template) -> None:
+        # responseLatency feeds the SlowestRequests saved query (without it the
+        # query can't sort by latency). $context.error.messageString must NOT
+        # appear in a JSON format: absent access-log variables render as a bare
+        # dash, so the unquoted form corrupts every success line and the quoted
+        # form double-quotes every error line. The quoted raw
+        # $context.error.message is the least-bad JSON-safe option.
+        stages = backend_template.find_resources("AWS::ApiGateway::Stage")
+        assert stages, "expected at least one API Gateway stage"
+        for stage in stages.values():
+            log_format = stage["Properties"]["AccessLogSetting"]["Format"]
+            assert "$context.responseLatency" in log_format
+            assert "$context.error.messageString" not in log_format, (
+                "messageString is unusable in a JSON access-log format — see the comment in HelloWorldApp"
+            )
+            assert '"$context.error.message"' in log_format
+
+    def test_stage_depends_on_execution_log_group(self, backend_template: Template) -> None:
+        # The execution log group is pre-created so CFN owns it; if the stage
+        # goes live first, API Gateway auto-creates the group (unencrypted, no
+        # retention) and the LogGroup CREATE then collides. The explicit
+        # DependsOn makes the CMK-encrypted group win the race.
+        stages = backend_template.find_resources("AWS::ApiGateway::Stage")
+        assert stages, "expected at least one API Gateway stage"
+        for stage in stages.values():
+            assert "AppHelloWorldApiExecutionLogsA5806940" in stage.get("DependsOn", []), (
+                "Prod stage must depend on the pre-created execution log group"
+            )
 
     def test_api_gateway_cache_cluster_disabled(self, backend_template: Template) -> None:
         # Cache cluster is intentionally disabled for cost (~$14/mo for the smallest size)
@@ -459,6 +538,50 @@ class TestFrontendStack:
         props = auto_delete_groups[0]["Properties"]
         assert "KmsKeyId" in props
         assert "RetentionInDays" in props
+
+    def test_cloudtrail_records_only_s3_data_events(self, frontend_template: Template) -> None:
+        # The trail exists for object-level S3 data events. CDK's defaults
+        # (Trail.management_events=ALL, add_s3_event_selector include_management_
+        # events=True) would additionally record every regional management event
+        # — a billed second copy in any account that already has a trail.
+        trails = frontend_template.find_resources("AWS::CloudTrail::Trail")
+        assert len(trails) == 1, "expected exactly one CloudTrail trail"
+        (trail,) = trails.values()
+        selectors = trail["Properties"]["EventSelectors"]
+        assert selectors, "expected event selectors on the trail"
+        for selector in selectors:
+            assert selector.get("IncludeManagementEvents") is False, (
+                "trail must not record management events — S3 data events only"
+            )
+        assert any("DataResources" in s for s in selectors), "expected an S3 data-event selector"
+
+    def test_async_providers_have_failure_destinations(self, frontend_template: Template) -> None:
+        # CFN invokes custom-resource provider Lambdas asynchronously; a crash
+        # that exhausts the two automatic retries is silently dropped without an
+        # on_failure destination. Both stack-level Function-based providers
+        # (AwsCustomResource provider + BucketDeployment handler) must carry an
+        # EventInvokeConfig wiring their SQS DLQ.
+        frontend_template.resource_count_is("AWS::Lambda::EventInvokeConfig", 2)
+
+    def test_auto_delete_custom_resources_depend_on_log_group(self, frontend_template: Template) -> None:
+        # The auto-delete provider logs on its CREATE invocation. If that
+        # happens before CFN creates the explicit CMK log group, Lambda
+        # implicitly creates the group and the LogGroup CREATE then fails with
+        # "already exists". Each bucket's auto-delete custom resource must
+        # depend on the log group so the CMK-encrypted group always wins.
+        log_groups = frontend_template.find_resources("AWS::Logs::LogGroup")
+        auto_delete_lg_ids = [
+            logical_id
+            for logical_id, lg in log_groups.items()
+            if isinstance(lg["Properties"].get("LogGroupName"), dict) and "Fn::Join" in lg["Properties"]["LogGroupName"]
+        ]
+        assert len(auto_delete_lg_ids) == 1
+        custom_resources = frontend_template.find_resources("Custom::S3AutoDeleteObjects")
+        assert custom_resources, "expected auto-delete custom resources for the buckets"
+        for logical_id, resource in custom_resources.items():
+            assert auto_delete_lg_ids[0] in resource.get("DependsOn", []), (
+                f"{logical_id} must depend on the auto-delete provider log group"
+            )
 
     def test_three_s3_buckets_exist(self, frontend_template: Template) -> None:
         # FrontendBucket + FrontendAccessLogBucket + CloudTrailLogsBucket

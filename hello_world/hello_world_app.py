@@ -64,6 +64,7 @@ from hello_world.nag_utils import (
     build_managed_threat_rules,
     grant_guardduty_service_to_key,
     grant_logs_service_to_key,
+    waf_log_destination,
 )
 
 
@@ -178,9 +179,8 @@ class HelloWorldApp(Construct):
             kms_key_identifier=self.encryption_key.key_arn,
         )
 
-        # Initial feature flags configuration. CFN registration runs as a
-        # side effect of construction, so no variable binding is needed.
-        appconfig.CfnHostedConfigurationVersion(
+        # Initial feature flags configuration.
+        flags_version = appconfig.CfnHostedConfigurationVersion(
             self,
             "FeatureFlagsVersion",
             application_id=self.app_config_app.ref,
@@ -191,6 +191,37 @@ class HelloWorldApp(Construct):
                 '{"name":"Enhanced Greeting","default":false}},'
                 '"values":{"enhanced_greeting":{"enabled":false}}}'
             ),
+        )
+
+        # A hosted configuration version is inert until DEPLOYED: the AppConfig
+        # data plane (GetLatestConfiguration, which Powertools FeatureFlags
+        # calls) only serves configuration that has been deployed to the
+        # environment. Without this Deployment the enhanced_greeting flag could
+        # never evaluate true and every fetch would take the handler's
+        # error-fallback path. All-at-once with zero bake suits a sample app —
+        # production forks should consider a gradual strategy with CloudWatch
+        # alarm rollback. CFN re-runs the deployment whenever the hosted
+        # version changes (ConfigurationVersion references flags_version.ref).
+        flags_deployment_strategy = appconfig.CfnDeploymentStrategy(
+            self,
+            "FeatureFlagsDeployStrategy",
+            name=f"{stack.stack_name}-all-at-once",
+            deployment_duration_in_minutes=0,
+            growth_factor=100,
+            final_bake_time_in_minutes=0,
+            replicate_to="NONE",
+        )
+        appconfig.CfnDeployment(
+            self,
+            "FeatureFlagsDeployment",
+            application_id=self.app_config_app.ref,
+            environment_id=app_config_env.ref,
+            configuration_profile_id=app_config_profile.ref,
+            configuration_version=flags_version.ref,
+            deployment_strategy_id=flags_deployment_strategy.ref,
+            # Same CMK as the hosted content — keeps the deployment data inside
+            # the one auditable key, matching the profile's kms_key_identifier.
+            kms_key_identifier=self.encryption_key.key_arn,
         )
 
         # Explicit Lambda log group with 1-week retention (implicit group has no retention).
@@ -316,6 +347,15 @@ class HelloWorldApp(Construct):
                 access_log_format=apigw.AccessLogFormat.custom(
                     # Built from typed AccessLogField references — json_with_standard_fields
                     # only supports 10 fixed fields; custom() is the CDK API for extended formats.
+                    #
+                    # errorMessage stays the quoted RAW $context.error.message on
+                    # purpose. $context.error.messageString looks like the
+                    # JSON-safe variant but is unusable here: absent access-log
+                    # variables render as a bare dash, so the unquoted form
+                    # corrupts every success line ("errorMessage":-) and the
+                    # quoted form double-quotes every error line. The residual
+                    # exposure of the raw form — a message containing a double
+                    # quote breaks JSON parsing for that one line — is accepted.
                     "{"
                     + ",".join(
                         [
@@ -330,6 +370,9 @@ class HelloWorldApp(Construct):
                             f'"responseType":"{apigw.AccessLogField.context_error_response_type()}"',
                             f'"errorMessage":"{apigw.AccessLogField.context_error_message()}"',
                             f'"requestTime":"{apigw.AccessLogField.context_request_time()}"',
+                            # Feeds the SlowestRequests saved query in
+                            # _create_insights_queries — total request latency in ms.
+                            f'"responseLatency":"{apigw.AccessLogField.context_response_latency()}"',
                             f'"ip":"{apigw.AccessLogField.context_identity_source_ip()}"',
                             f'"caller":"{apigw.AccessLogField.context_identity_caller()}"',
                             f'"user":"{apigw.AccessLogField.context_identity_user()}"',
@@ -361,7 +404,7 @@ class HelloWorldApp(Construct):
         # Explicit execution log group — API Gateway creates this outside CloudFormation
         # when logging_level is enabled. Pre-creating it here transfers ownership to CFN
         # so it is deleted on cdk destroy. Name format is fixed by the API Gateway service.
-        logs.LogGroup(
+        execution_log_group = logs.LogGroup(
             self,
             "HelloWorldApiExecutionLogs",
             log_group_name=f"API-Gateway-Execution-Logs_{self.api.rest_api_id}/Prod",
@@ -369,6 +412,12 @@ class HelloWorldApp(Construct):
             retention=logs.RetentionDays.ONE_WEEK,
             removal_policy=RemovalPolicy.DESTROY,
         )
+        # Order the stage after the group: if the stage goes live first and a
+        # request arrives mid-deploy, API Gateway auto-creates the group
+        # (unencrypted, no retention) and this LogGroup CREATE then fails with
+        # "already exists". No cycle: the group depends only on the RestApi
+        # (via rest_api_id in its name), not on the stage.
+        self.api.deployment_stage.node.add_dependency(execution_log_group)
 
         # Regional WAF on API Gateway — closes the CloudFront-bypass window on the
         # public execute-api URL. See _attach_regional_waf for the full rationale.
@@ -513,10 +562,12 @@ class HelloWorldApp(Construct):
             retention=logs.RetentionDays.ONE_WEEK,
             removal_policy=RemovalPolicy.DESTROY,
         )
+        # Destination ARN normalized via waf_log_destination — WAF documents the
+        # log-group ARN without the ":*" suffix that CDK's log_group_arn carries.
         wafv2.CfnLoggingConfiguration(
             self,
             "ApiRegionalWafLogging",
-            log_destination_configs=[regional_waf_log_group.log_group_arn],
+            log_destination_configs=[waf_log_destination(regional_waf_log_group)],
             resource_arn=regional_acl.attr_arn,
         )
 
@@ -686,10 +737,20 @@ class HelloWorldApp(Construct):
             self,
             "LambdaSlowInvocations",
             query_definition_name=f"{stack_name}/Lambda/SlowInvocations",
+            # The function uses JSON log format (logging_format=JSON above), so
+            # the platform REPORT line is a structured platform.report record and
+            # Logs Insights' auto-extracted @duration — parsed from the *text*
+            # REPORT format — never populates. Query the structured record's
+            # metrics instead.
             query_string=logs.QueryString(
-                fields=["@timestamp", "@duration", "function_request_id", "xray_trace_id", "message"],
-                filter_statements=["@duration > 3000"],
-                sort="@duration desc",
+                fields=[
+                    "@timestamp",
+                    "record.metrics.durationMs",
+                    "record.requestId",
+                    "record.metrics.maxMemoryUsedMB",
+                ],
+                filter_statements=["type = 'platform.report'", "record.metrics.durationMs > 3000"],
+                sort="record.metrics.durationMs desc",
                 limit=50,
             ),
             log_groups=[lambda_log_group],
@@ -734,9 +795,14 @@ class HelloWorldApp(Construct):
             self,
             "ApiGatewayLatency",
             query_definition_name=f"{stack_name}/ApiGateway/SlowestRequests",
+            # responseLatency is logged by the access-log format above
+            # ($context.responseLatency, total request latency in ms) — sorting
+            # on it is what makes this query actually return the *slowest*
+            # requests rather than the most recent ones.
             query_string=logs.QueryString(
                 fields=[
                     "@timestamp",
+                    "responseLatency",
                     "status",
                     "httpMethod",
                     "resourcePath",
@@ -745,7 +811,7 @@ class HelloWorldApp(Construct):
                     "xrayTraceId",
                     "requestId",
                 ],
-                sort="@timestamp desc",
+                sort="responseLatency desc",
                 limit=50,
             ),
             log_groups=[api_log_group],

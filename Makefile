@@ -101,7 +101,11 @@ test-integration: ## Run integration tests against a deployed stack (uses .venv-
 	# --override-ini drops the project-wide --cov-fail-under=100 gate (which
 	# only makes sense for unit tests over lambda/) so integration tests don't
 	# fail the run on coverage instead of behavior. Mirrors test-cdk's pattern.
-	$(LAMBDA_RUN) pytest tests/integration -v --override-ini="addopts="
+	# --timeout=120 lifts the 30s per-test cap from pyproject (an ini option,
+	# NOT part of addopts, so the override above does not touch it): the
+	# warm-latency test makes 4 sequential HTTP calls with 10s client timeouts
+	# and can exceed 30s on a degraded network without anything being wrong.
+	$(LAMBDA_RUN) pytest tests/integration -v --override-ini="addopts=" --timeout=120
 
 # =============================================================================
 # Code quality

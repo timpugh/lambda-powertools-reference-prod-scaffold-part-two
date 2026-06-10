@@ -117,7 +117,10 @@ def main() -> None:
         description=DESCRIPTION,
         servers=[
             Server(
-                url="https://{apiId}.execute-api.{region}.amazonaws.com/prod",
+                # Stage paths are case-sensitive and the CDK stage is named
+                # "Prod" (StageOptions.stage_name in HelloWorldApp) — "/prod"
+                # would 403 against a real deployment.
+                url="https://{apiId}.execute-api.{region}.amazonaws.com/Prod",
                 description="API Gateway stage (substitute your deployed apiId and region)",
             ),
         ],

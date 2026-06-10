@@ -22,6 +22,7 @@ from hello_world.nag_utils import (
     apply_compliance_aspects,
     build_managed_threat_rules,
     grant_logs_service_to_key,
+    waf_log_destination,
 )
 
 
@@ -100,10 +101,13 @@ class HelloWorldWafStack(Stack):
                 # in nag_utils.py for why the list lives in one place.
                 *build_managed_threat_rules(self.stack_name),
                 # Rate limiting — blocks a single client exceeding 200 requests per 5 minutes.
-                # Aggregates by FORWARDED_IP (X-Forwarded-For) because all traffic enters via
-                # CloudFront, so the source IP at WAF is CloudFront's edge — not the caller's.
-                # fallback_behavior=MATCH means a missing/invalid header trips the rule, which
-                # is the safer default (a determined caller can't bypass by stripping XFF).
+                # Aggregates by plain IP: a CLOUDFRONT-scoped ACL inspects the *viewer*
+                # request at the edge, where the source IP already is the real client's —
+                # CloudFront only appends X-Forwarded-For later, toward the origin. A
+                # FORWARDED_IP aggregation here would make the rule a no-op: browsers don't
+                # send XFF, and per the WAF docs a request that is missing the configured
+                # header skips the rule entirely (fallback behavior fires only for headers
+                # that are present but invalid).
                 wafv2.CfnWebACL.RuleProperty(
                     name="RateLimitPerIP",
                     priority=4,
@@ -111,11 +115,7 @@ class HelloWorldWafStack(Stack):
                     statement=wafv2.CfnWebACL.StatementProperty(
                         rate_based_statement=wafv2.CfnWebACL.RateBasedStatementProperty(
                             limit=200,
-                            aggregate_key_type="FORWARDED_IP",
-                            forwarded_ip_config=wafv2.CfnWebACL.ForwardedIPConfigurationProperty(
-                                header_name="X-Forwarded-For",
-                                fallback_behavior="MATCH",
-                            ),
+                            aggregate_key_type="IP",
                         )
                     ),
                     visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
@@ -127,11 +127,13 @@ class HelloWorldWafStack(Stack):
             ],
         )
 
-        # Enable WAF logging to the CloudWatch Logs log group.
+        # Enable WAF logging to the CloudWatch Logs log group. The destination
+        # ARN is normalized via waf_log_destination — WAF documents the log-group
+        # ARN without the ":*" suffix that CDK's log_group_arn carries.
         wafv2.CfnLoggingConfiguration(
             self,
             "WAFLogging",
-            log_destination_configs=[waf_log_group.log_group_arn],
+            log_destination_configs=[waf_log_destination(waf_log_group)],
             resource_arn=web_acl.attr_arn,
         )
 
@@ -185,13 +187,23 @@ class HelloWorldWafStack(Stack):
             log_groups=[waf_log_group],
         )
 
+        # Stack-level on purpose: when the frontend stack consumes web_acl_arn
+        # from another region (cross_region_references=True), CDK lazily adds a
+        # Custom::CrossRegionExportWriter provider — role + CDK-generated inline
+        # policy — to THIS stack *after* this constructor returns, so a
+        # per-resource suppression can never target it. Same-region deploys
+        # never create the writer and the suppression is simply unused.
+        cross_region_writer_reason = (
+            "CDK's CrossRegionExportWriter custom resource (created lazily by "
+            "cross_region_references after stack construction) uses a CDK-generated "
+            "inline policy on its provider role — not directly configurable"
+        )
         NagSuppressions.add_stack_suppressions(
             self,
             [
-                {
-                    "id": "NIST.800.53.R5-IAMNoInlinePolicy",
-                    "reason": "KMS key grants use inline statements — not directly replaceable with managed policies",
-                },
+                {"id": "NIST.800.53.R5-IAMNoInlinePolicy", "reason": cross_region_writer_reason},
+                {"id": "HIPAA.Security-IAMNoInlinePolicy", "reason": cross_region_writer_reason},
+                {"id": "PCI.DSS.321-IAMNoInlinePolicy", "reason": cross_region_writer_reason},
             ],
         )
 

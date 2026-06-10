@@ -81,7 +81,10 @@ class HelloWorldStack(Stack):
             self,
             "CloudWatchDashboardUrl",
             description="CloudWatch dashboard URL for this stack",
-            value=f"https://{self.region}.console.aws.amazon.com/cloudwatch/home#dashboards:name={self.stack_name}",
+            value=(
+                f"https://{self.region}.console.aws.amazon.com/cloudwatch/home"
+                f"?region={self.region}#dashboards/dashboard/{self.stack_name}"
+            ),
         )
 
         # ── Singleton-scoped cdk-nag suppressions ───────────────────────────────
