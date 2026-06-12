@@ -128,6 +128,42 @@ def waf_log_destination(log_group: logs.LogGroup) -> str:
     return Fn.select(0, Fn.split(":*", log_group.log_group_arn))
 
 
+def grant_cloudwatch_alarms_to_key(key: kms.Key, *, account: str, region: str) -> None:
+    """Grant CloudWatch alarms the KMS operations needed to publish to a CMK-encrypted SNS topic.
+
+    When an alarm fires against a topic with SSE enabled, SNS performs the KMS
+    data-key operations *as the publishing service principal* — so per the SNS
+    key-management docs, ``cloudwatch.amazonaws.com`` needs ``kms:Decrypt`` and
+    ``kms:GenerateDataKey*`` in the key policy. Without this grant the alarm
+    transitions to ALARM but the notification is silently dropped (the publish
+    is denied at KMS, and CloudWatch does not surface the failure anywhere
+    actionable) — the worst failure mode for an alerting path.
+
+    Confused-deputy guard: ``kms:ViaService`` pins the grant to KMS calls made
+    through SNS in this region (the only path CloudWatch alarm actions use),
+    and ``aws:SourceAccount`` restricts to alarms in this account.
+    ``aws:SourceArn`` is deliberately omitted: unlike CloudTrail/GuardDuty
+    above, CloudWatch is not documented to set it on the via-SNS KMS calls, and
+    an unmatched required condition would deny the publish — recreating the
+    silent-drop failure this grant exists to prevent. Verify alarm→SNS delivery
+    on a live deployment when changing anything in this statement.
+    """
+    key.add_to_resource_policy(
+        iam.PolicyStatement(
+            sid="AllowCloudWatchAlarmsViaSns",
+            actions=["kms:Decrypt", "kms:GenerateDataKey*"],
+            principals=[iam.ServicePrincipal("cloudwatch.amazonaws.com")],
+            resources=["*"],
+            conditions={
+                "StringEquals": {
+                    "aws:SourceAccount": account,
+                    "kms:ViaService": f"sns.{region}.amazonaws.com",
+                },
+            },
+        )
+    )
+
+
 def grant_guardduty_service_to_key(key: kms.Key, *, region: str, account: str, partition: str) -> None:
     """Grant GuardDuty ``kms:Decrypt`` on a CMK so Lambda Protection can introspect.
 

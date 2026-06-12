@@ -221,16 +221,52 @@ def test_idempotency_key_header_is_case_insensitive(
     assert ret["statusCode"] == 200
 
 
-def test_require_env_raises_when_missing(lambda_app_module, monkeypatch):
-    """_require_env raises RuntimeError naming the missing variable.
+def test_env_model_rejects_missing_variable(lambda_app_module):
+    """EnvVars fails validation when a required variable is absent.
 
-    The function runs at import time on real deploys so a missing var fails
-    the cold start with a clear message; this test pins that contract.
+    The model is validated at import time on real deploys so a missing var
+    fails the cold start with a field-by-field pydantic report; this test
+    pins that contract by validating an env dict with one key removed.
     """
-    monkeypatch.delenv("UNIT_TEST_ABSENT_VAR", raising=False)
+    from pydantic import ValidationError
 
-    with pytest.raises(RuntimeError, match="UNIT_TEST_ABSENT_VAR"):
-        lambda_app_module._require_env("UNIT_TEST_ABSENT_VAR")
+    valid = dict.fromkeys(lambda_app_module.EnvVars.model_fields, "test-value")
+    del valid["IDEMPOTENCY_TABLE_NAME"]
+
+    with pytest.raises(ValidationError, match="IDEMPOTENCY_TABLE_NAME"):
+        lambda_app_module.EnvVars.model_validate(valid)
+
+
+def test_env_model_rejects_empty_string(lambda_app_module):
+    """EnvVars rejects empty strings, not just absent keys.
+
+    An env var that is *set but empty* (a common CDK wiring mistake — e.g. an
+    unresolved token rendering as "") must fail validation the same way a
+    missing one does, rather than flowing into boto3 as an empty table name.
+    """
+    from pydantic import ValidationError
+
+    values = dict.fromkeys(lambda_app_module.EnvVars.model_fields, "test-value")
+    values["GREETING_PARAM_NAME"] = ""
+
+    with pytest.raises(ValidationError, match="GREETING_PARAM_NAME"):
+        lambda_app_module.EnvVars.model_validate(values)
+
+
+def test_env_model_appconfig_max_age_default_and_wiring(lambda_app_module):
+    """APPCONFIG_MAX_AGE_SECONDS defaults to 300 and reaches the AppConfig store.
+
+    The default keeps the feature-flag fetch on the same 300s caching posture
+    as the SSM read; without max_age wired through, Powertools re-polls the
+    AppConfig data plane every 5 seconds per warm container. Asserting on the
+    live store instance catches a refactor that drops the parameter while the
+    model keeps validating.
+    """
+    values = {f: "test-value" for f in lambda_app_module.EnvVars.model_fields if f != "APPCONFIG_MAX_AGE_SECONDS"}
+    env = lambda_app_module.EnvVars.model_validate(values)
+
+    assert env.APPCONFIG_MAX_AGE_SECONDS == 300
+    assert lambda_app_module.app_config_store.cache_seconds == 300
 
 
 def test_persistence_layer_error_propagates(apigw_event, lambda_context, lambda_app_module, monkeypatch, mocker):

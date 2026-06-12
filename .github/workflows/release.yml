@@ -1,0 +1,42 @@
+name: Release
+
+# Automates the final step of the release recipe (README "Cutting a release"):
+# when an annotated v* tag is pushed, publish the GitHub Release from the tag
+# message. Version selection, changelog regeneration, and tagging stay manual
+# and git-cliff-driven by design — this workflow only removes the step where a
+# pushed tag sits without a published release until someone remembers to run
+# `gh release create`.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write  # create the release
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          # Full history + tags so --verify-tag and --notes-from-tag can read
+          # the annotated tag object, not just the commit it points at.
+          fetch-depth: 0
+
+      - name: Publish GitHub release from annotated tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists (published manually) — nothing to do."
+            exit 0
+          fi
+          # Same flags as the documented manual command: notes come from the
+          # annotated tag body, the release is marked latest, and --verify-tag
+          # refuses to invent a tag that does not exist on the remote.
+          gh release create "$GITHUB_REF_NAME" --notes-from-tag --latest --verify-tag

@@ -1,0 +1,123 @@
+"""Stage-level assertion tests: environment naming, stack tags, and the cdk-nag gate.
+
+The deployment-environment dimension (``env_name``) namespaces stack names so
+ephemeral per-developer/per-branch deployments never collide with the
+long-lived ``prod`` stacks in a shared account. These tests pin three
+contracts:
+
+1. **prod keeps the legacy names byte-for-byte** — any drift would orphan the
+   currently deployed stacks (CloudFormation matches stacks by name).
+2. **Non-prod names embed the env name and disable alarm paging.**
+3. **Every stack synthesizes with zero unsuppressed cdk-nag errors.** This is
+   a near-equivalent of the CLI ``cdk synth '**'`` gate that runs without
+   Docker: ``Template.from_stack`` never *raises* on Aspect errors, but the
+   findings are present as error-level annotations, so asserting the
+   annotation list is empty catches an unsuppressed finding locally instead
+   of in the CI cdk-check job. The CLI synth remains the authoritative gate
+   (it also covers asset bundling); see CLAUDE.md.
+"""
+
+import pytest
+
+aws_cdk = pytest.importorskip("aws_cdk", reason="aws_cdk not installed — skipping CDK stage tests")
+
+import aws_cdk as cdk
+from aws_cdk.assertions import Annotations, Match, Template
+
+from hello_world.hello_world_stage import DEFAULT_ENV_NAME, HelloWorldStage, validate_env_name
+
+# Skip Docker bundling so these tests run without Docker (same key the CLI honours).
+_NO_BUNDLING = {"aws:cdk:bundling-stacks": []}
+
+
+@pytest.fixture(scope="module")
+def prod_stage() -> HelloWorldStage:
+    """Synthesize the default (prod) stage for us-east-1."""
+    app = cdk.App(context=_NO_BUNDLING)
+    return HelloWorldStage(app, "HelloWorld-us-east-1-stage", region="us-east-1")
+
+
+@pytest.fixture(scope="module")
+def dev_stage() -> HelloWorldStage:
+    """Synthesize an ephemeral developer stage."""
+    app = cdk.App(context=_NO_BUNDLING)
+    return HelloWorldStage(
+        app,
+        "HelloWorld-alice-feature-x-us-east-1-stage",
+        region="us-east-1",
+        env_name="alice-feature-x",
+    )
+
+
+class TestEnvironmentNaming:
+    def test_prod_default_keeps_legacy_stack_names(self, prod_stage: HelloWorldStage) -> None:
+        # Byte-for-byte: a rename here orphans the deployed prod stacks.
+        assert prod_stage.waf.stack_name == "HelloWorldWaf-us-east-1"
+        assert prod_stage.backend.stack_name == "HelloWorld-us-east-1"
+        assert prod_stage.frontend.stack_name == "HelloWorldFrontend-us-east-1"
+
+    def test_ephemeral_env_namespaces_every_stack(self, dev_stage: HelloWorldStage) -> None:
+        assert dev_stage.waf.stack_name == "HelloWorldWaf-alice-feature-x-us-east-1"
+        assert dev_stage.backend.stack_name == "HelloWorld-alice-feature-x-us-east-1"
+        assert dev_stage.frontend.stack_name == "HelloWorldFrontend-alice-feature-x-us-east-1"
+
+    def test_ephemeral_env_disables_alarm_paging(self, dev_stage: HelloWorldStage) -> None:
+        # Non-prod environments must not create the SNS alarm topic — an
+        # ephemeral branch stack should never page an operator.
+        template = Template.from_stack(dev_stage.backend)
+        template.resource_count_is("AWS::SNS::Topic", 0)
+
+    def test_prod_env_routes_alarms_to_topic(self, prod_stage: HelloWorldStage) -> None:
+        template = Template.from_stack(prod_stage.backend)
+        template.resource_count_is("AWS::SNS::Topic", 1)
+
+    @pytest.mark.parametrize("bad_name", ["", "has space", "has/slash", "-leading-hyphen", "x" * 40])
+    def test_invalid_env_names_fail_at_synth(self, bad_name: str) -> None:
+        # Stack names embed the env name; reject illegal values with a clear
+        # message at synth instead of an opaque CloudFormation error at deploy.
+        with pytest.raises(ValueError, match="Invalid deployment environment name"):
+            validate_env_name(bad_name)
+
+    def test_default_env_name_is_prod(self) -> None:
+        # app.py and the Makefile lean on this default; changing it silently
+        # re-points bare `cdk deploy` away from the long-lived stacks.
+        assert DEFAULT_ENV_NAME == "prod"
+
+
+class TestStackTags:
+    def test_all_stacks_carry_service_environment_owner_tags(self, prod_stage: HelloWorldStage) -> None:
+        # Stack tags propagate to every taggable resource at deploy time —
+        # cost allocation and console filtering for free. They live in the
+        # deploy-time manifest (not the template body), so assert on the
+        # stack's tag manager rather than template properties.
+        for stack in (prod_stage.waf, prod_stage.backend, prod_stage.frontend):
+            tags = stack.tags.tag_values()
+            assert tags.get("service") == "hello-world"
+            assert tags.get("environment") == "prod"
+            assert tags.get("owner"), "owner tag must be non-empty (username or ci fallback)"
+
+    def test_ephemeral_stage_tags_carry_env_name(self, dev_stage: HelloWorldStage) -> None:
+        assert dev_stage.backend.tags.tag_values().get("environment") == "alice-feature-x"
+
+
+class TestNagCompliance:
+    """Zero unsuppressed cdk-nag findings, asserted per stack without Docker."""
+
+    @pytest.mark.parametrize("stack_attr", ["waf", "backend", "frontend"])
+    def test_no_unsuppressed_nag_errors(self, prod_stage: HelloWorldStage, stack_attr: str) -> None:
+        stack = getattr(prod_stage, stack_attr)
+        errors = Annotations.from_stack(stack).find_error("*", Match.string_like_regexp(".*"))
+        details = "\n".join(
+            f"  {e.id}: {(e.entry.data if isinstance(e.entry.data, str) else str(e.entry.data)).splitlines()[0]}"
+            for e in errors
+        )
+        assert not errors, (
+            f"unsuppressed cdk-nag findings on {stack.stack_name} — fix the resource or add a "
+            f"scoped suppression with a reason (see CLAUDE.md):\n{details}"
+        )
+
+    def test_dev_stage_has_no_unsuppressed_nag_errors(self, dev_stage: HelloWorldStage) -> None:
+        # The non-prod shape (no SNS topic) must be nag-clean too — otherwise
+        # ephemeral stacks would fail the CI synth gate when env is overridden.
+        errors = Annotations.from_stack(dev_stage.backend).find_error("*", Match.string_like_regexp(".*"))
+        assert not errors

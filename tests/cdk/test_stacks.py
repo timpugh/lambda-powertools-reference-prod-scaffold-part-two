@@ -200,15 +200,57 @@ class TestBackendStack:
         backend_template.has_resource_properties("AWS::KMS::Key", {"EnableKeyRotation": True})
 
     def test_dynamodb_has_pitr_enabled(self, backend_template: Template) -> None:
+        # TableV2 synthesizes AWS::DynamoDB::GlobalTable, where PITR (and the
+        # 1-day recovery window — shortest allowed; the cache's records TTL out
+        # after an hour, so longer PITR retention is pure storage cost) lives
+        # per-replica rather than at the table level.
         backend_template.has_resource_properties(
-            "AWS::DynamoDB::Table",
-            {"PointInTimeRecoverySpecification": {"PointInTimeRecoveryEnabled": True}},
+            "AWS::DynamoDB::GlobalTable",
+            {
+                "Replicas": Match.array_with(
+                    [
+                        Match.object_like(
+                            {
+                                "PointInTimeRecoverySpecification": {
+                                    "PointInTimeRecoveryEnabled": True,
+                                    "RecoveryPeriodInDays": 1,
+                                }
+                            }
+                        )
+                    ]
+                )
+            },
         )
 
     def test_dynamodb_has_kms_encryption(self, backend_template: Template) -> None:
+        # GlobalTable splits encryption across a table-level SSESpecification
+        # (algorithm) and a per-replica KMSMasterKeyId (the CMK). Assert both —
+        # SSEType KMS alone would also pass with an AWS-owned key.
         backend_template.has_resource_properties(
-            "AWS::DynamoDB::Table",
-            {"SSESpecification": {"SSEEnabled": True}},
+            "AWS::DynamoDB::GlobalTable",
+            {
+                "SSESpecification": {"SSEEnabled": True, "SSEType": "KMS"},
+                "Replicas": Match.array_with(
+                    [Match.object_like({"SSESpecification": {"KMSMasterKeyId": Match.any_value()}})]
+                ),
+            },
+        )
+
+    def test_dynamodb_contributor_insights_throttled_keys_mode(self, backend_template: Template) -> None:
+        # THROTTLED_KEYS records insights only for throttled keys — the signal
+        # this cache needs — at a fraction of full-table insights cost. Pinned
+        # so a refactor back to the bool flag (full mode) is a visible change.
+        backend_template.has_resource_properties(
+            "AWS::DynamoDB::GlobalTable",
+            {
+                "Replicas": Match.array_with(
+                    [
+                        Match.object_like(
+                            {"ContributorInsightsSpecification": {"Enabled": True, "Mode": "THROTTLED_KEYS"}}
+                        )
+                    ]
+                )
+            },
         )
 
     def test_lambda_has_active_tracing(self, backend_template: Template) -> None:
@@ -216,6 +258,34 @@ class TestBackendStack:
             "AWS::Lambda::Function",
             {"TracingConfig": {"Mode": "Active"}, "MemorySize": 256},
         )
+
+    def test_lambda_runtime_and_system_log_level(self, backend_template: Template) -> None:
+        # Runtime currency retires the AwsSolutions-L1 / Serverless-LambdaLatestVersion
+        # suppressions; SystemLogLevel pins the platform-log posture in code.
+        # The SlowInvocations saved query reads platform.report records, which
+        # are emitted at INFO — raising this level would silently blind it.
+        backend_template.has_resource_properties(
+            "AWS::Lambda::Function",
+            {
+                "Runtime": "python3.14",
+                "LoggingConfig": Match.object_like({"LogFormat": "JSON", "SystemLogLevel": "INFO"}),
+            },
+        )
+
+    def test_lambda_async_retries_pinned_to_zero(self, backend_template: Template) -> None:
+        # retry_attempts=0 documents that no async invocation path exists (the
+        # function is API Gateway-synchronous only). The application function's
+        # EventInvokeConfig must carry the explicit 0 — the custom-resource
+        # provider's EventInvokeConfig (DLQ wiring) intentionally leaves
+        # retries at the service default, so match on the qualified function.
+        configs = backend_template.find_resources("AWS::Lambda::EventInvokeConfig")
+        app_configs = [
+            c
+            for c in configs.values()
+            if "HelloWorldFunction" in json.dumps(c["Properties"].get("FunctionName"), default=str)
+        ]
+        assert len(app_configs) == 1, "expected exactly one EventInvokeConfig on the application function"
+        assert app_configs[0]["Properties"]["MaximumRetryAttempts"] == 0
 
     def test_lambda_has_reserved_concurrency(self, backend_template: Template) -> None:
         # Reserved concurrency bounds blast radius and retires the
@@ -295,6 +365,93 @@ class TestBackendStack:
         assert len(dashboard_deletes) == 1, "expected exactly one DeleteDashboards custom resource"
         assert "ApplicationInsights-ApplicationInsights-TestBackendStack" in dashboard_deletes[0], (
             "cleanup must target the doubled-prefix dashboard name Application Insights actually creates"
+        )
+
+    def test_appconfig_deletion_protection_bypassed(self, backend_template: Template) -> None:
+        # The account-level AppConfig deletion-protection window refuses to
+        # delete environments/profiles a client polled recently — which is
+        # *always* true for this Lambda. Without BYPASS, every `cdk destroy`
+        # of a recently used stack fails mid-teardown, recreating the class of
+        # dangling-teardown problem `make destroy-clean` exists to solve.
+        backend_template.has_resource_properties("AWS::AppConfig::Environment", {"DeletionProtectionCheck": "BYPASS"})
+        backend_template.has_resource_properties(
+            "AWS::AppConfig::ConfigurationProfile", {"DeletionProtectionCheck": "BYPASS"}
+        )
+
+    def test_alarm_topic_is_encrypted_and_locked_down(self, backend_template: Template) -> None:
+        # The default (production) environment routes alarms to one SNS topic.
+        # It must be CMK-encrypted (same project key as every other resource)
+        # and its policy must both deny plaintext publishes and admit only
+        # CloudWatch acting for this account's alarms.
+        backend_template.resource_count_is("AWS::SNS::Topic", 1)
+        backend_template.has_resource_properties("AWS::SNS::Topic", {"KmsMasterKeyId": Match.any_value()})
+        backend_template.has_resource_properties(
+            "AWS::SNS::TopicPolicy",
+            {
+                "PolicyDocument": {
+                    "Statement": Match.array_with(
+                        [
+                            Match.object_like(
+                                {
+                                    "Effect": "Deny",
+                                    "Action": "sns:Publish",
+                                    "Condition": {"Bool": {"aws:SecureTransport": "false"}},
+                                }
+                            ),
+                            Match.object_like(
+                                {
+                                    "Sid": "AllowCloudWatchAlarmsPublish",
+                                    "Effect": "Allow",
+                                    "Principal": {"Service": "cloudwatch.amazonaws.com"},
+                                    "Condition": Match.object_like(
+                                        {"StringEquals": {"aws:SourceAccount": Match.any_value()}}
+                                    ),
+                                }
+                            ),
+                        ]
+                    )
+                }
+            },
+        )
+
+    def test_alarms_exist_and_publish_to_topic(self, backend_template: Template) -> None:
+        # An alarm with no action is a dashboard widget, not an alert. Every
+        # alarm in the stack (Lambda p90 latency + API Gateway 5xx fault rate)
+        # must carry an AlarmAction referencing the SNS topic.
+        alarms = backend_template.find_resources("AWS::CloudWatch::Alarm")
+        assert len(alarms) >= 2, "expected at least the p90 latency and 5xx fault-rate alarms"
+        names = json.dumps([a["Properties"].get("AlarmName") for a in alarms.values()])
+        assert "Latency-P90" in names
+        assert "Fault-Rate" in names
+        for logical_id, alarm in alarms.items():
+            actions = alarm["Properties"].get("AlarmActions", [])
+            assert actions, f"{logical_id} has no AlarmActions — it would fire silently"
+            assert "AlarmTopic" in json.dumps(actions), f"{logical_id} must publish to the alarm topic"
+
+    def test_kms_key_grants_cloudwatch_via_sns(self, backend_template: Template) -> None:
+        # Without this key-policy statement the CMK-encrypted publish is denied
+        # at KMS and alarm notifications vanish silently — the worst failure
+        # mode for an alerting path. The grant must stay confused-deputy-guarded
+        # (kms:ViaService pins it to SNS; aws:SourceAccount to this account).
+        keys = backend_template.find_resources("AWS::KMS::Key")
+        statements = []
+        for key in keys.values():
+            statements.extend(key["Properties"]["KeyPolicy"]["Statement"])
+        cw_statements = [s for s in statements if s.get("Sid") == "AllowCloudWatchAlarmsViaSns"]
+        assert len(cw_statements) == 1, "expected exactly one CloudWatch-via-SNS key grant"
+        condition = cw_statements[0]["Condition"]["StringEquals"]
+        assert condition["aws:SourceAccount"] == _TEST_ACCOUNT
+        assert condition["kms:ViaService"] == f"sns.{_TEST_REGION}.amazonaws.com"
+
+    def test_non_production_env_has_no_alarm_topic(self) -> None:
+        # Ephemeral/dev environments keep the dashboards and alarms but must
+        # not create the SNS topic — short-lived stacks never page anyone.
+        app = cdk.App(context=_NO_BUNDLING)
+        stack = HelloWorldStack(app, "TestDevBackendStack", is_production_env=False, env=_TEST_ENV)
+        template = Template.from_stack(stack)
+        template.resource_count_is("AWS::SNS::Topic", 0)
+        assert len(template.find_resources("AWS::CloudWatch::Alarm")) >= 2, (
+            "non-prod must keep its alarms (just without SNS routing)"
         )
 
     def test_appconfig_flags_are_deployed_to_environment(self, backend_template: Template) -> None:
@@ -649,7 +806,12 @@ class TestLogicalIdStability:
     # ── Backend ────────────────────────────────────────────────────────────────
 
     def test_backend_dynamodb_table_id(self, backend_template: Template) -> None:
-        assert "AppIdempotencyTable7A3F72D5" in backend_template.find_resources("AWS::DynamoDB::Table")
+        # Intentional replacement (per this class's docstring guidance): the
+        # TableV2 migration changed the resource type to AWS::DynamoDB::GlobalTable,
+        # and CloudFormation refuses in-place type changes — so the construct ID
+        # moved to IdempotencyTableV2 and the old table is deleted on deploy.
+        # Accepted data loss: TTL'd idempotency cache, RemovalPolicy.DESTROY.
+        assert "AppIdempotencyTableV22138F48F" in backend_template.find_resources("AWS::DynamoDB::GlobalTable")
 
     def test_backend_kms_key_id(self, backend_template: Template) -> None:
         assert "AppEncryptionKey7F644894" in backend_template.find_resources("AWS::KMS::Key")

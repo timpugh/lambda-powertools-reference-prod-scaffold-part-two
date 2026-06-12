@@ -1,0 +1,36 @@
+name: PR Title
+
+# The changelog (git-cliff via cliff.toml) and release notes are derived from
+# Conventional Commit prefixes, and PRs are squash-merged with the PR title as
+# the commit subject — so a malformed title silently drops the change from
+# CHANGELOG.md. This gate enforces the prefix grammar documented in README
+# "Commit message convention" and CLAUDE.md. Implemented as an inline check
+# (no third-party action) to keep the workflow supply-chain surface at zero.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-title:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check title follows Conventional Commits
+        # Title is passed via env, never interpolated into the script body —
+        # PR titles are attacker-controlled input in public repos.
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          regex='^(feat|fix|docs|chore|ci|test|refactor|build)(\([a-zA-Z0-9._/-]+\))?!?: .+'
+          if printf '%s' "$TITLE" | grep -qE "$regex"; then
+            echo "PR title OK: $TITLE"
+          else
+            echo "::error::PR title must follow Conventional Commits: type(scope)?: subject"
+            echo "::error::Allowed types: feat fix docs chore ci test refactor build (append ! for breaking changes)"
+            echo "::error::Got: $TITLE"
+            exit 1
+          fi

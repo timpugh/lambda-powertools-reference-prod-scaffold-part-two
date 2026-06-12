@@ -29,12 +29,24 @@ class HelloWorldStack(Stack):
     expressed on individual resources.
     """
 
-    def __init__(self, scope: Construct, construct_id: str, **kwargs: Any) -> None:
+    def __init__(self, scope: Construct, construct_id: str, *, is_production_env: bool = True, **kwargs: Any) -> None:
+        """Compose the application construct into a deployable stack.
+
+        Args:
+            scope: The CDK construct scope.
+            construct_id: The unique identifier for this stack.
+            is_production_env: Forwarded to :class:`HelloWorldApp` — production
+                environments route alarm notifications to an SNS topic;
+                ephemeral/dev environments skip the topic. Defaults to True so
+                direct instantiation (tests, single-environment deploys)
+                matches the default ``prod`` deployment environment.
+            **kwargs: Additional keyword arguments passed to the parent Stack.
+        """
         super().__init__(scope, construct_id, **kwargs)
 
         apply_compliance_aspects(self)
 
-        self.app = HelloWorldApp(self, "App")
+        self.app = HelloWorldApp(self, "App", is_production_env=is_production_env)
 
         # Expose API URL + ID for consumption by the frontend stack (api_id lets the
         # frontend CSP pin the exact execute-api host instead of a region wildcard).
@@ -86,6 +98,17 @@ class HelloWorldStack(Stack):
                 f"?region={self.region}#dashboards/dashboard/{self.stack_name}"
             ),
         )
+        # Only present in production environments — non-prod skips the alarm
+        # topic entirely (see HelloWorldApp.__init__). Surfaced so operators
+        # can attach subscriptions (email/Chatbot/PagerDuty) without console
+        # archaeology.
+        if self.app.alarm_topic is not None:
+            CfnOutput(
+                self,
+                "AlarmTopicName",
+                description="SNS topic that CloudWatch alarms publish to (attach subscriptions here)",
+                value=self.app.alarm_topic.topic_name,
+            )
 
         # ── Singleton-scoped cdk-nag suppressions ───────────────────────────────
         # CDK-managed singleton Lambdas (currently just the AwsCustomResource

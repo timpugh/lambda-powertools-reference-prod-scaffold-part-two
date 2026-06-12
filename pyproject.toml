@@ -35,11 +35,11 @@ lambda = [
 # assertion tests. Conflicts with `lambda` at the `attrs` pin (CDK requires
 # attrs<26 via jsii; Powertools requires attrs>=26).
 cdk = [
-    "aws-cdk-lib==2.248.0",
+    "aws-cdk-lib==2.258.1",
     "constructs==10.6.0",
-    "aws-cdk-aws-lambda-python-alpha==2.248.0a0",
-    "cdk-monitoring-constructs==9.22.2",
-    "cdk-nag==2.37.55",
+    "aws-cdk-aws-lambda-python-alpha==2.258.1a0",
+    "cdk-monitoring-constructs==10.1.0",
+    "cdk-nag==2.38.2",
 ]
 
 # Test runner — environment-agnostic; pairs with either `lambda` (unit tests,
@@ -57,6 +57,12 @@ test = [
 ]
 
 # Linting / static analysis / supply-chain checks — environment-agnostic.
+# pydantic is pinned here (same version the lambda group resolves) so the
+# pydantic.mypy plugin works in BOTH venvs: .venv-lambda already gets pydantic
+# via Powertools, but .venv (CDK side) has no other reason to carry it, and
+# mypy errors out at startup if a configured plugin is not importable.
+# pydantic has no `attrs` dependency, so it does not touch the lambda/cdk
+# resolution conflict.
 lint = [
     "radon==6.0.1",
     "xenon==0.9.3",
@@ -67,6 +73,7 @@ lint = [
     "pip-audit==2.10.0",
     "pre-commit==4.6.0",
     "boto3-stubs==1.43.5",
+    "pydantic==2.13.4",
 ]
 
 # Documentation build — used only by `make docs`. The Zensical static site
@@ -140,7 +147,7 @@ known-third-party = ["aws_lambda_powertools", "boto3"]
 # S101: assert statements — valid in pytest; S106: hardcoded password — false positive on fixtures
 "tests/**/*.py" = ["S101", "S106"]
 # E402: imports follow pytest.importorskip() which must come first to skip the module when aws_cdk is absent
-"tests/cdk/test_stacks.py" = ["E402"]
+"tests/cdk/*.py" = ["E402"]
 
 # =============================================================================
 # Mypy — static type checker
@@ -156,6 +163,16 @@ check_untyped_defs = true       # type-check function bodies even if the functio
 no_implicit_optional = true     # f(x: str = None) does not implicitly mean Optional[str]
 ignore_missing_imports = true   # suppress errors for third-party packages without type stubs
 show_error_codes = true         # print [error-code] next to each error (required for type: ignore[code])
+# pydantic plugin: type-checks model constructor calls against field types and
+# catches misspelled field names. pydantic is pinned in BOTH venvs (lambda group
+# via Powertools; lint group explicitly) so this plugin loads in the CDK-side
+# pre-commit hook and in the .venv-lambda `make typecheck` run alike.
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_forbid_extra = true               # flag unknown keyword args to model constructors
+init_typed = true                      # type-check constructor args instead of accepting Any
+warn_required_dynamic_aliases = true   # warn when a required field uses a dynamic alias mypy can't verify
 
 # =============================================================================
 # Pylint — design and complexity checks that complement ruff's style checks

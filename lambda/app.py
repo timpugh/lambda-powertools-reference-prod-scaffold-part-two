@@ -9,13 +9,14 @@ Data Classes.
 """
 
 import os
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 import boto3
 from aws_lambda_powertools import Logger, Metrics, Tracer
 from aws_lambda_powertools.event_handler import APIGatewayRestResolver
 from aws_lambda_powertools.event_handler.api_gateway import CORSConfig
 from aws_lambda_powertools.event_handler.exceptions import InternalServerError
+from aws_lambda_powertools.logging import correlation_paths
 from aws_lambda_powertools.metrics import MetricUnit
 from aws_lambda_powertools.utilities.data_classes import APIGatewayProxyEvent
 from aws_lambda_powertools.utilities.feature_flags import AppConfigStore, FeatureFlags
@@ -34,20 +35,36 @@ from aws_lambda_powertools.utilities.parameters import SSMProvider
 from aws_lambda_powertools.utilities.parameters.exceptions import GetParameterError
 from aws_lambda_powertools.utilities.typing import LambdaContext
 from botocore.config import Config
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PositiveInt
 
 
-def _require_env(name: str) -> str:
-    """Return the env var or raise at import time with a clear message.
+class EnvVars(BaseModel):
+    """Typed view of the environment variables this handler requires.
 
-    A missing env var (table name, profile name, etc.) only surfaces deep
-    inside boto3 as an opaque parameter-validation error. Failing here makes
-    the misconfiguration obvious in CloudWatch on the very first invocation.
+    Validated once at module load (below). A missing or malformed env var
+    (table name, profile name, a non-numeric cache age) would otherwise only
+    surface deep inside boto3 as an opaque parameter-validation error; failing
+    at import time with pydantic's field-by-field report makes the
+    misconfiguration obvious in CloudWatch on the very first invocation.
+    Validation is stricter than a presence check: empty strings are rejected
+    and the cache age must parse as a positive integer.
     """
-    value = os.environ.get(name)
-    if not value:
-        raise RuntimeError(f"Required environment variable {name!r} is not set")
-    return value
+
+    IDEMPOTENCY_TABLE_NAME: Annotated[str, Field(min_length=1)]
+    GREETING_PARAM_NAME: Annotated[str, Field(min_length=1)]
+    APPCONFIG_APP_NAME: Annotated[str, Field(min_length=1)]
+    APPCONFIG_ENV_NAME: Annotated[str, Field(min_length=1)]
+    APPCONFIG_PROFILE_NAME: Annotated[str, Field(min_length=1)]
+    # In-memory TTL for the fetched feature-flag configuration. Defaults to the
+    # same 300s the SSM read uses (see ssm_provider.get below) so the two
+    # config-fetch paths share one caching posture; override per environment
+    # via the Lambda environment block in CDK when flags must propagate faster.
+    APPCONFIG_MAX_AGE_SECONDS: PositiveInt = 300
+
+
+# Module-level so a bad deployment fails the cold start, not the Nth request.
+# Extra keys in os.environ are ignored by pydantic's default model config.
+_ENV = EnvVars.model_validate(dict(os.environ))
 
 
 logger = Logger()
@@ -111,7 +128,7 @@ app = APIGatewayRestResolver(
 # requestContext.requestId, which changes on every retry) is what actually makes
 # the layer deduplicate.
 persistence_layer = DynamoDBPersistenceLayer(
-    table_name=_require_env("IDEMPOTENCY_TABLE_NAME"),
+    table_name=_ENV.IDEMPOTENCY_TABLE_NAME,
     boto_config=boto_config,
 )
 idempotency_config = IdempotencyConfig(
@@ -125,10 +142,15 @@ idempotency_config = IdempotencyConfig(
 # retry config. Passing boto_config= (or sdk_config=) to AppConfigStore instead
 # routes through a parameter that Powertools v3 deprecated and emits a warning,
 # so an explicit client is the clean way to apply the retry policy here.
+# max_age lifts the fetched-configuration TTL from the Powertools default of
+# 5 seconds — which would re-poll the AppConfig data plane every 5s per warm
+# container — to the same 300s posture as the SSM read below. Tunable per
+# environment via APPCONFIG_MAX_AGE_SECONDS.
 app_config_store = AppConfigStore(
-    environment=_require_env("APPCONFIG_ENV_NAME"),
-    application=_require_env("APPCONFIG_APP_NAME"),
-    name=_require_env("APPCONFIG_PROFILE_NAME"),
+    environment=_ENV.APPCONFIG_ENV_NAME,
+    application=_ENV.APPCONFIG_APP_NAME,
+    name=_ENV.APPCONFIG_PROFILE_NAME,
+    max_age=_ENV.APPCONFIG_MAX_AGE_SECONDS,
     boto3_client=boto3.client("appconfigdata", config=boto_config),
 )
 feature_flags = FeatureFlags(store=app_config_store)
@@ -140,9 +162,9 @@ feature_flags = FeatureFlags(store=app_config_store)
 # invocations to preserve warm-container caching (max_age is set per get() call).
 ssm_provider = SSMProvider(boto_config=boto_config)
 
-# Greeting parameter name resolved at module load — fail loudly on
-# misconfiguration rather than letting boto3 reject an empty key at runtime.
-GREETING_PARAM_NAME = _require_env("GREETING_PARAM_NAME")
+# Greeting parameter name resolved at module load — validated as non-empty by
+# the EnvVars model above rather than letting boto3 reject an empty key at runtime.
+GREETING_PARAM_NAME = _ENV.GREETING_PARAM_NAME
 
 
 class HelloResponse(BaseModel):
@@ -155,6 +177,33 @@ class HelloResponse(BaseModel):
     )
 
 
+class MissingIdempotencyKeyResponse(BaseModel):
+    """Body of the 400 returned when the required Idempotency-Key header is absent.
+
+    Shape must match the hand-built response in ``lambda_handler`` — that 400 is
+    constructed outside the Powertools resolver (the idempotency layer rejects
+    the request before the resolver runs), so this model exists purely to
+    document the contract in the generated OpenAPI spec.
+    """
+
+    message: str = Field(
+        "Idempotency-Key header is required",
+        description="Explanation of the rejected request.",
+    )
+
+
+class InternalErrorResponse(BaseModel):
+    """Body of the 500 produced by Powertools' ServiceError handling.
+
+    When ``hello`` raises ``InternalServerError`` (e.g. the SSM read fails),
+    the resolver serialises it as ``{"statusCode": 500, "message": ...}`` —
+    documented here so spec consumers see the failure shape, not just the 200.
+    """
+
+    statusCode: int = Field(500, description="HTTP status code echoed in the body.")  # noqa: N815 — matches the wire format
+    message: str = Field(..., description="Error description.", examples=["Failed to fetch greeting"])
+
+
 @app.get(
     "/hello",
     summary="Return a greeting",
@@ -162,12 +211,31 @@ class HelloResponse(BaseModel):
         "Returns the greeting string configured in SSM Parameter Store. "
         "When the `enhanced_greeting` AppConfig feature flag is enabled for "
         "the caller's source IP, the response includes the feature flag's "
-        "configured suffix."
+        "configured suffix. Requires an `Idempotency-Key` header; requests "
+        "without one are rejected with 400 before this route runs."
     ),
     response_description="A JSON object containing the resolved greeting.",
     tags=["Greeting"],
+    # Error responses documented explicitly — the generated OpenAPI spec
+    # otherwise covers only the happy path, leaving the 400 (missing
+    # Idempotency-Key, enforced outside the resolver) and the 500 (SSM
+    # failure) invisible to spec consumers and breaking-change tooling.
+    responses={
+        200: {
+            "description": "The resolved greeting.",
+            "content": {"application/json": {"model": HelloResponse}},
+        },
+        400: {
+            "description": "Missing Idempotency-Key header.",
+            "content": {"application/json": {"model": MissingIdempotencyKeyResponse}},
+        },
+        500: {
+            "description": "Greeting could not be fetched from SSM Parameter Store.",
+            "content": {"application/json": {"model": InternalErrorResponse}},
+        },
+    },
 )
-@tracer.capture_method
+@tracer.capture_method(capture_response=False)
 def hello() -> HelloResponse:
     """Handle GET /hello requests.
 
@@ -261,14 +329,23 @@ def _resolve_with_idempotency(event: dict[str, Any], context: LambdaContext) -> 
     replayed. This is acceptable for this single-GET reference (the documented
     contract is one key per logical request — see README "Idempotency keys"); a
     fork that wants transient errors retried under the same key should move
-    @idempotent onto ``hello`` (the success-bearing function) instead of the
-    resolver, accepting that the missing-key→400 path then needs a separate guard.
+    idempotency onto ``hello`` (the success-bearing function) instead of the
+    resolver — Powertools supports this directly via
+    ``@idempotent_function(data_keyword_argument=..., ...)`` with a
+    ``PydanticSerializer`` output serializer, so the cached record stores the
+    validated response model rather than a raw dict — accepting that the
+    missing-key→400 path then needs a separate guard.
     """
     return cast("dict[str, Any]", app.resolve(event, context))
 
 
-@logger.inject_lambda_context
-@tracer.capture_lambda_handler
+# correlation_id_path lifts the API Gateway request id into a correlation_id
+# field on every log record of the invocation, so one request's records can be
+# joined in Logs Insights without relying on the single line that logs
+# request_id by hand. capture_response=False keeps response payloads out of
+# X-Ray segments — traces record timing and metadata, not body content.
+@logger.inject_lambda_context(correlation_id_path=correlation_paths.API_GATEWAY_REST)
+@tracer.capture_lambda_handler(capture_response=False)
 @metrics.log_metrics(capture_cold_start_metric=True)
 def lambda_handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
     """Lambda entry point.

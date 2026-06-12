@@ -24,13 +24,13 @@ The hard gates a fork needs to clear before customer traffic touches it. Most it
 
 **Operations gates:**
 
-- [ ] Alarms wired to a pageable channel — `MonitoringFacade` creates alarms but they aren't routed anywhere; cdk-wakeful + SNS / Chatbot / PagerDuty
+- [~] Alarms wired to a pageable channel — *routing done:* every alarm (Lambda p90 latency, API Gateway 5xx fault rate) publishes to a CMK-encrypted SNS topic in the `prod` environment (`AlarmTopicName` CfnOutput). *Still open:* attaching subscriptions (email / Chatbot / PagerDuty) — deliberately manual since they need out-of-band confirmation
 - [ ] CloudWatch Logs retention at audit-grade durations on the WAF and CloudTrail log groups (current 7-day setting is sample-app default)
 - [ ] Live integration tests in CI as a post-deploy gate
 
 **Deployment safety gates:**
 
-- [ ] Multi-environment deployment pipeline (dev → staging → prod with approval gates) — current CI builds and tests; deploys are manual via `make deploy`
+- [ ] Multi-environment deployment pipeline (dev → staging → prod with approval gates) — current CI builds and tests; deploys are manual via `make deploy`. *Groundwork done:* stack names now carry an environment dimension (`make deploy ENV=<name>` / `-c env=<name>` deploys a namespaced, collision-free copy; non-prod skips alarm paging), so a pipeline can deploy per-stage environments without stack-name collisions
 - [ ] Branch protection enforced, not routinely bypassed
 - [ ] CDK bootstrap permissions narrowed with a permissions boundary
 
@@ -55,7 +55,7 @@ The hard gates a fork needs to clear before customer traffic touches it. Most it
 
 ## Infrastructure
 
-- [ ] **Multi-environment CDK stacks** — separate dev/staging/prod stacks with environment-specific config (SSM paths, AppConfig environments, DynamoDB table names)
+- [~] **Multi-environment CDK stacks** — *naming + gating done:* `HelloWorldStage` takes an `env_name` (default `prod` keeps legacy names; anything else namespaces all three stacks) and threads `is_production_env` through to gate alarm routing; `make deploy ENV=<name>` / `make destroy-clean ENV=<name>` are env-aware end to end. *Still open:* per-environment config beyond alarm gating (environment-specific SSM values, AppConfig environments, retention/throttling tiers)
 - [x] **API Gateway throttling** — stage-level `throttling_rate_limit=100` / `throttling_burst_limit=200` on the Prod stage in [hello_world/hello_world_app.py](hello_world/hello_world_app.py) cap steady-state and burst request rates across every route. `Serverless-APIGWDefaultThrottling` suppression retired.
 - [x] **WAF** — CLOUDFRONT-scoped WebACL deployed in `HelloWorldWafStack` and attached to CloudFront (AWS managed rule sets: IP reputation, CRS, known bad inputs, anonymous IPs + a forwarded-IP rate-limit rule). A REGIONAL WebACL mirroring the four managed rule groups is also associated with the API Gateway Prod stage (`HelloWorldApp._attach_regional_waf`) so the direct `execute-api` URL is no longer an unprotected bypass. The shared rule set lives in `build_managed_threat_rules` ([hello_world/nag_utils.py](hello_world/nag_utils.py)).
 - [ ] **SSM SecureString** — store the greeting parameter as a `SecureString` (KMS-encrypted) rather than plaintext. Note: CloudFormation does not support creating SecureString parameters, so this would require a custom resource or out-of-band provisioning.
@@ -65,11 +65,11 @@ The hard gates a fork needs to clear before customer traffic touches it. Most it
 
 ## Observability
 
-- [ ] **CloudWatch alarms** — add alarms for Lambda error rate, p99 latency, and DynamoDB throttles, with SNS notifications
+- [~] **CloudWatch alarms** — *in place:* Lambda p90 latency (> 3s) and API Gateway 5xx fault-rate (> 1%) alarms via `MonitoringFacade`, publishing to the CMK-encrypted SNS topic in prod, plus an ERROR-log widget and an hourly `HelloRequests` business-KPI widget on the dashboard. *Still open:* Lambda error-rate and DynamoDB throttle alarms (add via `add_fault_rate_alarm=` / `add_consumed_capacity_alarm=` on the existing facade calls)
 - [ ] **Dead letter queue (DLQ) on the application Lambda** — `HelloWorldFunction` is invoked synchronously by API Gateway so a function-level DLQ doesn't apply today. The `AwsCustomResource` provider singletons (which CFN invokes async) already have an SQS DLQ wired via `attach_async_failure_destination()`. If the application Lambda ever takes async event sources (EventBridge, SNS, S3 events), wire `on_failure` on those source mappings or invocation configs.
 - [ ] **Structured error reporting** — integrate with an error tracking service (e.g. Sentry) for aggregated error visibility
 - [ ] **CloudWatch Logs retention beyond 7 days** — every log group in the stack uses `RetentionDays.ONE_WEEK`. Most compliance frameworks (HIPAA, PCI) require 1-year minimum on audit-relevant logs (CloudTrail, WAF), and the [CloudTrail security best practices](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/best-practices-security.html) reinforce that. For a fork at production scale, raise audit-log retention to 365 days while keeping application logs short to control storage cost. The `CloudTrailLogsBucket` lifecycle (currently 30-day expiration) needs to move in lockstep.
-- [ ] **`cdk-wakeful` alarm routing** — the `MonitoringFacade` creates dashboards and alarms but the alarms aren't wired to anything. [cdk-wakeful](https://github.com/aws-samples/cdk-wakeful) auto-routes alarms to SNS, with built-in integrations for AWS Chatbot and SSM Incident Manager. Single-line CDK change to enable; cost is an SNS topic + subscription. Real win once the stack is operated; pointless for a portfolio piece nobody monitors.
+- [ ] **`cdk-wakeful` alarm routing** — base SNS routing now exists (alarms publish to the CMK-encrypted topic in prod), so what cdk-wakeful would still add is the *subscription* side as code: built-in AWS Chatbot and SSM Incident Manager integrations instead of console-attached endpoints. Worth adopting once the stack is operated by a team.
 - [ ] **AWS Config conformance packs** — different *timing* layer from cdk-nag (cdk-nag is preventive at synth time, Config is detective at runtime). Catches drift introduced after deploy: someone disables KMS via console, IAM policy expansion via service-linked roles, a new resource type that an Aspect rule doesn't yet cover. Could live as a sibling stack `HelloWorldComplianceStack` deploying an `AWS::Config::ConformancePack` referencing one of AWS's published templates (Operational Best Practices for HIPAA Security, Operational Best Practices for FedRAMP, etc.). Cost: per-rule-evaluation pricing that scales with resource count, plus the configuration recorder.
 
 ## CI/CD

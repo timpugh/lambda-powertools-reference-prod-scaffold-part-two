@@ -1,0 +1,9 @@
+{
+  "name": "lambda-powertools-reference-tooling",
+  "private": true,
+  "description": "Node-side dev tooling. The aws-cdk CLI is pinned here (and tracked by Dependabot's npm ecosystem) so the one previously-floating supply-chain input — a globally installed CLI — is locked like every Python dependency. All invocations go through `npx cdk` so the pinned version is the one that runs.",
+  "devDependencies": {
+    "aws-cdk": "2.1126.0",
+    "markdownlint-cli": "0.48.0"
+  }
+}

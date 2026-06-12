@@ -79,3 +79,19 @@ jobs:
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Same patch/minor scope for the node-side tooling pinned in package.json
+      # (CDK CLI, markdownlint). Majors stay manual for the same reason as the
+      # Python step: a CDK CLI major ahead of the pinned aws-cdk-lib can change
+      # synth behavior, and that deserves a human look even when CI is green.
+      - name: Approve and auto-merge patch/minor npm updates
+        if: |
+          steps.metadata.outputs.package-ecosystem == 'npm_and_yarn' &&
+          (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+           steps.metadata.outputs.update-type == 'version-update:semver-minor')
+        run: |
+          gh pr review --approve "$PR_URL"
+          gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

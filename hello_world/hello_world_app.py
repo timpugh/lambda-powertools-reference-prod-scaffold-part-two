@@ -12,6 +12,8 @@ dev-next-to-prod) can be achieved by instantiating this construct multiple
 times without subclassing the Stack.
 """
 
+import json
+from pathlib import Path
 from typing import cast
 
 from aws_cdk import (
@@ -47,6 +49,9 @@ from aws_cdk import (
     aws_resourcegroups as rg,
 )
 from aws_cdk import (
+    aws_sns as sns,
+)
+from aws_cdk import (
     aws_ssm as ssm,
 )
 from aws_cdk import (
@@ -56,12 +61,21 @@ from aws_cdk import (
     custom_resources as cr,
 )
 from aws_cdk.aws_lambda_python_alpha import PythonFunction
-from cdk_monitoring_constructs import DefaultDashboardFactory, MonitoringFacade
+from cdk_monitoring_constructs import (
+    CustomMetricGroup,
+    DefaultDashboardFactory,
+    ErrorRateThreshold,
+    LatencyThreshold,
+    MetricStatistic,
+    MonitoringFacade,
+    SnsAlarmActionStrategy,
+)
 from cdk_nag import NagSuppressions
 from constructs import Construct
 
 from hello_world.nag_utils import (
     build_managed_threat_rules,
+    grant_cloudwatch_alarms_to_key,
     grant_guardduty_service_to_key,
     grant_logs_service_to_key,
     waf_log_destination,
@@ -75,7 +89,19 @@ class HelloWorldApp(Construct):
     Stack can reference them for CfnOutputs and cross-stack wiring.
     """
 
-    def __init__(self, scope: Construct, construct_id: str) -> None:
+    def __init__(self, scope: Construct, construct_id: str, *, is_production_env: bool = True) -> None:
+        """Build the application construct.
+
+        Args:
+            scope: The CDK construct scope.
+            construct_id: The scoped construct ID.
+            is_production_env: When True (the default, and what the default
+                ``prod`` deployment environment passes), alarm notifications
+                are routed to a CMK-encrypted SNS topic. Non-production
+                environments — ephemeral per-developer/per-branch stacks in
+                particular — still get the full dashboard and alarm set, but
+                without the SNS topic so short-lived stacks never page anyone.
+        """
         super().__init__(scope, construct_id)
 
         stack = Stack.of(self)
@@ -126,18 +152,42 @@ class HelloWorldApp(Construct):
         # DynamoDB table for Powertools idempotency.
         # No table_name set — CDK generates one. Avoids blocking replacement-style
         # schema changes and two deployments colliding in one account.
-        self.idempotency_table = dynamodb.Table(
+        #
+        # TableV2 (AWS::DynamoDB::GlobalTable) is the current-generation
+        # construct. The construct ID is "IdempotencyTableV2", not
+        # "IdempotencyTable": CloudFormation refuses to change a logical
+        # resource's *type* in place, so the V2 migration must present a new
+        # logical ID — CFN then creates the new table and deletes the old one.
+        # Replacement is an accepted data loss here: the table is a TTL'd
+        # idempotency cache (records expire after 1 hour) with
+        # RemovalPolicy.DESTROY, and the physical names are CDK-generated so
+        # the old and new tables never collide. The logical-ID stability test
+        # in tests/cdk/test_stacks.py was updated in the same commit, per its
+        # own guidance for intentional replacements.
+        self.idempotency_table = dynamodb.TableV2(
             self,
-            "IdempotencyTable",
+            "IdempotencyTableV2",
             partition_key=dynamodb.Attribute(name="id", type=dynamodb.AttributeType.STRING),
             time_to_live_attribute="expiration",
-            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            encryption=dynamodb.TableEncryption.CUSTOMER_MANAGED,
-            encryption_key=self.encryption_key,
-            contributor_insights_enabled=True,
+            # On-demand billing — TableV2's equivalent of PAY_PER_REQUEST.
+            billing=dynamodb.Billing.on_demand(),
+            encryption=dynamodb.TableEncryptionV2.customer_managed_key(self.encryption_key),
+            # THROTTLED_KEYS mode records contributor insights only for keys
+            # that experience throttling — the diagnostic signal this cache
+            # actually needs — at a fraction of the cost of full-table
+            # ACCESSED_AND_THROTTLED_KEYS insights.
+            contributor_insights_specification=dynamodb.ContributorInsightsSpecification(
+                enabled=True,
+                mode=dynamodb.ContributorInsightsMode.THROTTLED_KEYS,
+            ),
             removal_policy=RemovalPolicy.DESTROY,
             point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
                 point_in_time_recovery_enabled=True,
+                # PITR retains the shortest window AWS allows instead of the
+                # 35-day default: every record in this cache expires via TTL
+                # after one hour, so day-old recovery points are already pure
+                # storage cost with nothing meaningful to restore.
+                recovery_period_in_days=1,
             ),
         )
 
@@ -158,11 +208,16 @@ class HelloWorldApp(Construct):
             name=f"{stack.stack_name}-features",
         )
 
+        # deletion_protection_check=BYPASS — same teardown rationale as the
+        # configuration profile below: the account-level deletion-protection
+        # window would otherwise fail `cdk destroy` for any environment a
+        # Lambda polled recently.
         app_config_env = appconfig.CfnEnvironment(
             self,
             "FeatureFlagsEnv",
             application_id=self.app_config_app.ref,
             name=f"{stack.stack_name}-env",
+            deletion_protection_check="BYPASS",
         )
 
         # kms_key_identifier CMK-encrypts the hosted configuration content at
@@ -185,6 +240,16 @@ class HelloWorldApp(Construct):
         # exists outside the stack"). AppConfig L1s require a name (no CDK
         # auto-generation), so any future property change that replaces this
         # profile must change the name in the same commit.
+        #
+        # deletion_protection_check=BYPASS: AppConfig deletion protection (an
+        # account-level setting) refuses to delete environments and hosted
+        # configurations that a client polled within the protection window.
+        # The Lambda polls this profile continuously, so with the account
+        # default enabled every `cdk destroy` of a recently used stack would
+        # fail mid-teardown — the same class of dangling-teardown problem
+        # `make destroy-clean` exists to solve. BYPASS keeps teardown
+        # deterministic; production forks that want the guardrail can flip
+        # these to ACCOUNT_DEFAULT and accept manual deletes on destroy.
         app_config_profile = appconfig.CfnConfigurationProfile(
             self,
             "FeatureFlagsProfile",
@@ -193,18 +258,30 @@ class HelloWorldApp(Construct):
             location_uri="hosted",
             type="AWS.Freeform",
             kms_key_identifier=self.encryption_key.key_arn,
+            deletion_protection_check="BYPASS",
         )
 
         # Initial feature flags configuration, in the Powertools feature-flags
         # schema. "rules" (conditional enablement, e.g. by source_ip /
         # user_agent from the evaluation context) can be authored here later.
+        #
+        # The flag content lives in feature_flags.json next to this module —
+        # one file read by both this construct (at synth) and the unit test
+        # that validates it against the Powertools feature-flags schema
+        # (tests/unit/test_feature_flags_schema.py, which runs in the venv
+        # where Powertools is importable). json.loads is the synth-side guard:
+        # it can't check the flag schema (Powertools isn't installable next to
+        # CDK — see the attrs conflict in pyproject.toml) but it does fail the
+        # build on malformed JSON instead of shipping it to AppConfig.
+        flags_content = (Path(__file__).parent / "feature_flags.json").read_text()
+        json.loads(flags_content)
         flags_version = appconfig.CfnHostedConfigurationVersion(
             self,
             "FeatureFlagsVersion",
             application_id=self.app_config_app.ref,
             configuration_profile_id=app_config_profile.ref,
             content_type="application/json",
-            content='{"enhanced_greeting":{"default":false}}',
+            content=flags_content,
         )
 
         # A hosted configuration version is inert until DEPLOYED: the AppConfig
@@ -256,13 +333,20 @@ class HelloWorldApp(Construct):
         self.function = PythonFunction(
             self,
             "HelloWorldFunction",
-            runtime=_lambda.Runtime.PYTHON_3_13,
+            runtime=_lambda.Runtime.PYTHON_3_14,
             entry="lambda",
             index="app.py",
             handler="lambda_handler",
             architecture=_lambda.Architecture.ARM_64,
             memory_size=256,
             timeout=Duration.seconds(10),
+            # Async-retry posture made explicit: this function is only invoked
+            # synchronously (API Gateway), so Lambda's default of two automatic
+            # async retries is dead config — pinning it to 0 documents that no
+            # async path exists, and any future async event source must revisit
+            # this together with an on_failure destination (see the LambdaDLQ
+            # suppressions below).
+            retry_attempts=0,
             # Reserved concurrency caps how much of the account's concurrency pool
             # (default 1000) this one function can consume, so a runaway loop or a
             # traffic spike on /hello can't starve every other Lambda in the
@@ -275,6 +359,13 @@ class HelloWorldApp(Construct):
             tracing=_lambda.Tracing.ACTIVE,
             log_group=lambda_log_group,
             logging_format=_lambda.LoggingFormat.JSON,
+            # Platform/system log records (START, REPORT, platform.report, …)
+            # are filtered at INFO. That is the service default today, but the
+            # posture is pinned in code — same "visible in code, not implicit
+            # in the runtime default" rationale as recursive_loop below. Note
+            # the SlowInvocations saved query reads platform.report records,
+            # so this must never be raised above INFO without updating it.
+            system_log_level_v2=_lambda.SystemLogLevel.INFO,
             environment_encryption=self.encryption_key,
             environment={
                 "POWERTOOLS_SERVICE_NAME": "hello-world",
@@ -289,6 +380,10 @@ class HelloWorldApp(Construct):
                 "APPCONFIG_APP_NAME": self.app_config_app.name,
                 "APPCONFIG_ENV_NAME": app_config_env.name,
                 "APPCONFIG_PROFILE_NAME": app_config_profile.name,
+                # In-memory TTL for fetched feature flags (seconds). The handler
+                # defaults to 300 anyway; set explicitly so the caching posture
+                # is visible and tunable here rather than buried in code.
+                "APPCONFIG_MAX_AGE_SECONDS": "300",
             },
         )
 
@@ -501,30 +596,164 @@ class HelloWorldApp(Construct):
         # Must run after Application Insights has had a chance to create the dashboard
         app_insights_dashboard_cleanup.node.add_dependency(app_insights)
 
-        # Monitoring dashboard via cdk-monitoring-constructs
-        # CloudWatch dashboards are global — scope the name to the stack so
-        # multiple regional deployments don't collide on the same dashboard name.
+        # Monitoring dashboard, alarms, and (in production) SNS alarm routing.
+        self.alarm_topic = self._build_monitoring(lambda_log_group, is_production_env)
+
+        # Expose API URL for consumption by the enclosing stack and cross-stack refs
+        self.api_url = self.api.url
+
+        self._add_resource_suppressions(app_insights_dashboard_cleanup)
+
+    def _build_monitoring(self, lambda_log_group: logs.LogGroup, is_production_env: bool) -> sns.Topic | None:
+        """Build the CloudWatch dashboard, alarms, and alarm routing.
+
+        CloudWatch dashboards are global — the name is scoped to the stack so
+        multiple regional deployments don't collide on the same dashboard name.
+
+        Alarm routing: in production the alarm factory wires every alarm to
+        the CMK-encrypted SNS topic built in ``_build_alarm_topic`` — an alarm
+        that pages nobody is a dashboard widget, not an alert. Non-production
+        (ephemeral dev) stacks keep the alarms but skip the topic, with the
+        NIST/HIPAA alarm-action rules suppressed for that shape only.
+
+        Returns:
+            The alarm SNS topic in production environments, else None.
+        """
+        stack = Stack.of(self)
+        alarm_topic: sns.Topic | None = None
+        alarm_factory_defaults: dict[str, object] = {
+            "actions_enabled": True,
+            "alarm_name_prefix": stack.stack_name,
+        }
+        if is_production_env:
+            alarm_topic = self._build_alarm_topic()
+            alarm_factory_defaults["action"] = SnsAlarmActionStrategy(on_alarm_topic=alarm_topic)
+
         monitoring = MonitoringFacade(
             self,
             "Monitoring",
-            alarm_factory_defaults={
-                "actions_enabled": True,
-                "alarm_name_prefix": stack.stack_name,
-            },
+            alarm_factory_defaults=alarm_factory_defaults,
             dashboard_factory=DefaultDashboardFactory(
                 self,
                 "MonitoringDashboardFactory",
                 dashboard_name_prefix=stack.stack_name,
             ),
         )
-        monitoring.monitor_lambda_function(lambda_function=self.function)
-        monitoring.monitor_api_gateway(api=self.api)
+
+        # ── Service health: alarms + widgets ─────────────────────────────────
+        # Thresholds are deliberately modest reference-workload values — size
+        # them to real traffic in a fork. p90 of 3s sits under the function's
+        # 10s timeout but far above the warm path; a 1% 5xx fault rate catches
+        # systematic failure without paging on a single cold-start blip.
+        monitoring.add_large_header("Service health")
+        monitoring.monitor_lambda_function(
+            lambda_function=self.function,
+            add_latency_p90_alarm={"p90": LatencyThreshold(max_latency=Duration.seconds(3))},
+        )
+        # Surfaces recent ERROR-level records next to the Lambda metrics so an
+        # alarm investigation starts on the dashboard, not in Logs Insights.
+        monitoring.monitor_log(
+            log_group_name=lambda_log_group.log_group_name,
+            human_readable_name="Lambda error logs",
+            pattern="ERROR",
+            alarm_friendly_name="lambda error logs",
+        )
+        monitoring.monitor_api_gateway(
+            api=self.api,
+            add5_xx_fault_rate_alarm={"internal_error": ErrorRateThreshold(max_error_rate=1)},
+        )
         monitoring.monitor_dynamo_table(table=self.idempotency_table)
 
-        # Expose API URL for consumption by the enclosing stack and cross-stack refs
-        self.api_url = self.api.url
+        # ── Business KPIs ─────────────────────────────────────────────────────
+        # The handler emits HelloRequests (Powertools EMF) into the HelloWorld
+        # namespace with the service dimension Powertools adds from
+        # POWERTOOLS_SERVICE_NAME. Surfacing it here keeps the business signal
+        # on the same dashboard as the operational metrics it explains.
+        metric_factory = monitoring.create_metric_factory()
+        hello_requests_metric = metric_factory.create_metric(
+            metric_name="HelloRequests",
+            namespace="HelloWorld",
+            statistic=MetricStatistic.SUM,
+            dimensions_map={"service": "hello-world"},
+            label="hello requests",
+            period=Duration.hours(1),
+        )
+        monitoring.add_large_header("Business KPIs")
+        monitoring.monitor_custom(
+            metric_groups=[CustomMetricGroup(metrics=[hello_requests_metric], title="Hourly hello requests")],
+            human_readable_name="Business KPIs",
+            alarm_friendly_name="KPIs",
+        )
 
-        self._add_resource_suppressions(app_insights_dashboard_cleanup)
+        if not is_production_env:
+            # Non-prod keeps the alarms as dashboard signals but deliberately
+            # has no notification channel (no SNS topic — ephemeral stacks must
+            # never page anyone), which trips the NIST/HIPAA alarm-action rules
+            # on every alarm under the facade. Scoped to the monitoring subtree;
+            # the production shape routes every alarm to SNS and needs no
+            # suppression.
+            NagSuppressions.add_resource_suppressions(
+                monitoring,
+                [
+                    {
+                        "id": "NIST.800.53.R5-CloudWatchAlarmAction",
+                        "reason": "Ephemeral/dev environment — alarms are dashboard signals only; no paging channel by design",
+                    },
+                    {
+                        "id": "HIPAA.Security-CloudWatchAlarmAction",
+                        "reason": "Ephemeral/dev environment — alarms are dashboard signals only; no paging channel by design",
+                    },
+                ],
+                apply_to_children=True,
+            )
+
+        return alarm_topic
+
+    def _build_alarm_topic(self) -> sns.Topic:
+        """Create the CMK-encrypted SNS topic that alarm actions publish to.
+
+        The topic itself is deliberately subscription-free: where alerts land
+        (email, Chatbot, PagerDuty, …) is an operational choice a fork makes,
+        and subscriptions usually need out-of-band confirmation anyway. The
+        load-bearing parts are the wiring around it — the same project CMK
+        (with the CloudWatch-via-SNS key grant from ``nag_utils``), TLS-only
+        publish enforcement, and a topic policy that admits only this
+        account's alarms.
+        """
+        stack = Stack.of(self)
+        topic = sns.Topic(
+            self,
+            "AlarmTopic",
+            # Same CMK as logs/DDB/env-vars — keeps the alerting path inside
+            # the project's single auditable encryption surface.
+            master_key=self.encryption_key,
+            # Rejects plaintext-HTTP publishes via an aws:SecureTransport deny;
+            # also satisfies the SSL-only SNS rules in the nag packs.
+            enforce_ssl=True,
+        )
+        # Without this key grant, an alarm transition "succeeds" but the
+        # CMK-encrypted publish is denied at KMS and the notification silently
+        # vanishes — see grant_cloudwatch_alarms_to_key for the full rationale.
+        grant_cloudwatch_alarms_to_key(self.encryption_key, account=stack.account, region=stack.region)
+        # Topic policy: CloudWatch's service principal may publish, but only on
+        # behalf of alarms in this account (standard confused-deputy guard —
+        # CloudWatch documents aws:SourceArn/aws:SourceAccount for SNS topic
+        # policies on alarm actions).
+        topic.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="AllowCloudWatchAlarmsPublish",
+                actions=["sns:Publish"],
+                principals=[iam.ServicePrincipal("cloudwatch.amazonaws.com")],
+                resources=[topic.topic_arn],
+                conditions={
+                    "StringEquals": {"aws:SourceAccount": stack.account},
+                    "ArnLike": {
+                        "aws:SourceArn": f"arn:{stack.partition}:cloudwatch:{stack.region}:{stack.account}:alarm:*"
+                    },
+                },
+            )
+        )
+        return topic
 
     def _attach_regional_waf(self) -> None:
         """Attach a REGIONAL WAF WebACL to the API Gateway stage.
@@ -609,18 +838,22 @@ class HelloWorldApp(Construct):
         NagSuppressions.add_resource_suppressions(
             self.function,
             [
-                # cdk-nag has not updated its rule to recognize Python 3.13 as the latest Lambda runtime
-                {
-                    "id": "AwsSolutions-L1",
-                    "reason": "Python 3.13 is the latest Lambda runtime — cdk-nag rule not yet updated",
-                },
-                {
-                    "id": "Serverless-LambdaLatestVersion",
-                    "reason": "Python 3.13 is the latest Lambda runtime — cdk-nag rule not yet updated",
-                },
+                # AwsSolutions-L1 / Serverless-LambdaLatestVersion suppressions
+                # were retired when the runtime moved to Python 3.14, which the
+                # pinned cdk-nag release recognizes as latest.
                 {
                     "id": "Serverless-LambdaDLQ",
                     "reason": "Invoked synchronously via API Gateway — async DLQ pattern does not apply",
+                },
+                # retry_attempts=0 pins the async posture explicitly, which
+                # synthesizes an EventInvokeConfig; the async-failure rule then
+                # fires on it for the same not-applicable reason as LambdaDLQ.
+                {
+                    "id": "Serverless-LambdaAsyncFailureDestination",
+                    "reason": (
+                        "Invoked synchronously via API Gateway — no async event source exists; "
+                        "the EventInvokeConfig exists only to pin retry_attempts=0"
+                    ),
                 },
                 {
                     "id": "NIST.800.53.R5-LambdaDLQ",

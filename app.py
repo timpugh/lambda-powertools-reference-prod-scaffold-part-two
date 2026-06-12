@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """CDK application entry point.
 
-Synthesizes a :class:`HelloWorldStage` per target region. Each Stage groups
-the three stacks that make up one regional deployment (WAF, backend,
-frontend) so ``cdk deploy`` treats them as a single unit:
+Synthesizes a :class:`HelloWorldStage` per target region and deployment
+environment. Each Stage groups the three stacks that make up one regional
+deployment (WAF, backend, frontend) so ``cdk deploy`` treats them as a
+single unit:
 
   HelloWorldWaf-{region}      — WAF WebACL, physically in us-east-1
                                 (CloudFront constraint), but named per region
@@ -16,19 +17,32 @@ frontend) so ``cdk deploy`` treats them as a single unit:
 The target region is controlled by the ``region`` CDK context key.
 Defaults to us-east-1 if not specified.
 
-Usage:
-    cdk deploy --all                            # deploy to us-east-1 (default)
-    cdk deploy --all -c region=ap-southeast-1   # deploy a separate Singapore Stage
+The deployment environment is controlled by the ``env`` CDK context key,
+falling back to the ``ENVIRONMENT`` variable, defaulting to ``prod``.
+``prod`` keeps the un-suffixed stack names above (so the long-lived
+deployment is unaffected) and routes alarms to the SNS topic. Any other
+value namespaces every stack (``HelloWorld-{env}-{region}``), which makes
+ephemeral per-developer or per-branch deployments collision-free in a
+shared account, and disables alarm paging for them.
 
-Each regional Stage is fully independent — destroying one does not affect
-any other. All three stacks for a given region are destroyed together:
+Usage:
+    cdk deploy --all                            # prod stage in us-east-1 (default)
+    cdk deploy --all -c region=ap-southeast-1   # separate Singapore Stage
+    cdk deploy --all -c env=alice-feature-x     # ephemeral developer stage
+    make deploy ENV=alice-feature-x             # same, via the Makefile
+
+Each Stage is fully independent — destroying one does not affect any other.
+All three stacks for a given region+environment are destroyed together:
 
     cdk destroy --all -c region=ap-southeast-1
+    cdk destroy --all -c env=alice-feature-x
 """
+
+import os
 
 import aws_cdk as cdk
 
-from hello_world.hello_world_stage import HelloWorldStage
+from hello_world.hello_world_stage import DEFAULT_ENV_NAME, HelloWorldStage, stage_id
 
 app = cdk.App()
 
@@ -37,6 +51,14 @@ app = cdk.App()
 # inside the Stage regardless of this value.
 target_region: str = app.node.try_get_context("region") or "us-east-1"
 
-HelloWorldStage(app, f"HelloWorld-{target_region}-stage", region=target_region)
+# Deployment environment. Context key wins (explicit per-invocation intent);
+# the ENVIRONMENT variable serves pipelines that export it once per job;
+# the default keeps `cdk deploy` pointing at the long-lived prod stacks.
+env_name: str = app.node.try_get_context("env") or os.environ.get("ENVIRONMENT") or DEFAULT_ENV_NAME
+
+# Stage id composition lives next to the Stage (hello_world_stage.stage_id):
+# prod keeps the legacy id so existing cdk.out assembly paths and tooling
+# keyed on the stage name stay stable; other envs get their own id.
+HelloWorldStage(app, stage_id(env_name, target_region), region=target_region, env_name=env_name)
 
 app.synth()

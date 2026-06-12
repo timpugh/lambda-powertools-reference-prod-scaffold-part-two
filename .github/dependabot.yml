@@ -79,6 +79,23 @@ updates:
         update-types:
           - "patch"
 
+  # npm — tracks the node-side dev tooling pinned in package.json: the aws-cdk
+  # CLI (previously a floating global install, the one un-tracked supply-chain
+  # input in the repo) and markdownlint-cli. All invocations go through `npx`
+  # so the pinned versions are the ones that actually run, locally and in CI.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "America/New_York"
+    cooldown:
+      default-days: 5
+      semver-major-days: 14
+      semver-minor-days: 7
+      semver-patch-days: 3
+
   # pre-commit hooks — tracks the `rev:` field in .pre-commit-config.yaml.
   # Every tool that's also pinned in pyproject.toml (ruff, mypy, bandit,
   # pylint, xenon, pip-audit) is intentionally configured as a local

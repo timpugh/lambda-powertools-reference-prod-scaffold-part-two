@@ -26,11 +26,29 @@
 LAMBDA_ENV := UV_PROJECT_ENVIRONMENT=.venv-lambda
 LAMBDA_RUN := $(LAMBDA_ENV) uv run
 
+# CDK CLI comes from package.json via npx (installed by `npm ci` in `make
+# install`), not a global `npm install -g`. The global route left the CLI as
+# the one un-pinned supply-chain input in an otherwise fully-locked repo, and
+# let local and CI versions drift apart. Dependabot's npm ecosystem tracks the
+# pin in package.json like every Python dependency.
+CDK := npx cdk
+
+# Deployment environment for the env-aware targets below. Empty (the default)
+# targets the long-lived prod stacks with their legacy names. Set ENV to spin
+# up/tear down a namespaced, collision-free copy of all three stacks — e.g.
+# `make deploy ENV=alice-feature-x` — for per-developer or per-branch work in
+# a shared account. Non-prod environments keep dashboards and alarms but skip
+# the SNS alarm topic so an ephemeral stack never pages anyone. See app.py.
+ENV ?=
+ENVSEG := $(if $(ENV),-$(ENV))
+CDK_ENV_ARG := $(if $(ENV),-c env=$(ENV))
+
 .PHONY: help install install-cdk install-lambda doctor test test-cdk test-integration \
-	lint format typecheck security cdk-synth cdk-notices cdk-deprecations \
+	lint lint-docs format typecheck security check-lock pr \
+	cdk-synth cdk-notices cdk-deprecations \
 	cdk-ls cdk-diff cdk-drift cdk-revert-drift cdk-diagnose cdk-gc cdk-rollback \
 	deploy destroy destroy-clean _empty-frontend-buckets _delete-straggler-log-groups \
-	docs docs-open docs-serve lock upgrade deps-merge clean clean-venvs
+	docs docs-open docs-serve openapi compare-openapi lock upgrade deps-merge clean clean-venvs
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -39,7 +57,8 @@ help: ## Show this help message
 # Environment setup
 # =============================================================================
 
-install: install-cdk install-lambda ## Install both environments and pre-commit hooks
+install: install-cdk install-lambda ## Install both environments, node tooling (CDK CLI), and pre-commit hooks
+	npm ci
 	.venv/bin/pre-commit install
 
 # --locked mirrors CI (.github/workflows/ci.yml). Without it, a stale uv.lock
@@ -64,7 +83,8 @@ install-lambda: ## Install the Lambda runtime env into .venv-lambda (lambda + te
 doctor: ## Diagnostic snapshot — uv/cdk/drawio versions, venv state, pre-commit wiring
 	@echo "=== Toolchain ==="
 	@command -v uv >/dev/null 2>&1 && printf "uv:          %s\n" "$$(uv --version)" || echo "uv:          MISSING — install from https://docs.astral.sh/uv/"
-	@command -v cdk >/dev/null 2>&1 && printf "cdk CLI:     %s\n" "$$(cdk --version)" || echo "cdk CLI:     MISSING — run 'npm install -g aws-cdk'"
+	@command -v npm >/dev/null 2>&1 && printf "npm:         %s\n" "$$(npm --version)" || echo "npm:         MISSING — install Node.js (the CDK CLI is an npm package)"
+	@npx --no-install cdk --version >/dev/null 2>&1 && printf "cdk CLI:     %s (pinned via package.json)\n" "$$(npx --no-install cdk --version)" || echo "cdk CLI:     MISSING — run 'npm ci' (or 'make install')"
 	@command -v drawio >/dev/null 2>&1 && printf "drawio:      %s\n" "$$(drawio --version)" || echo "drawio:      MISSING (optional) — 'brew install --cask drawio' for diagram exports"
 	@echo
 	@echo "=== Virtual environments (project-local, gitignored) ==="
@@ -112,39 +132,39 @@ test-integration: ## Run integration tests against a deployed stack (uses .venv-
 # Code quality
 # =============================================================================
 
-cdk-synth: ## Synthesize all CDK stacks and validate cdk-nag rules (requires CDK CLI: npm install -g aws-cdk)
+cdk-synth: ## Synthesize all CDK stacks and validate cdk-nag rules (CDK CLI via `npm ci` / `make install`)
 	# The '**' glob descends into Stage-nested stacks. Without it, `cdk synth`
 	# stops at the Stage manifest, the three nested stacks never synthesize,
 	# and cdk-nag rules silently don't fire on them — so a "passing" synth
 	# can mask findings that surface later in `cdk deploy`.
-	cdk synth '**'
+	$(CDK) synth '**' $(CDK_ENV_ARG)
 
 cdk-notices: ## Show AWS-published CDK notices (CVEs, deprecated CDK versions, upcoming breaking changes)
-	cdk notices
+	$(CDK) notices
 
 cdk-deprecations: ## List every deprecated CDK API used by any stack (synth output filtered for "deprecated")
-	cdk synth '**' 2>&1 | grep -i deprecat || echo "No deprecated CDK APIs in use"
+	$(CDK) synth '**' $(CDK_ENV_ARG) 2>&1 | grep -i deprecat || echo "No deprecated CDK APIs in use"
 
 cdk-ls: ## List all CDK stacks (uses '**' to descend into Stage-nested stacks)
 	# Without '**', `cdk ls` stops at the top-level Stage manifest and
 	# prints nothing useful. With it, the three nested stacks (Backend,
 	# WAF, Frontend) are listed — handy as a sanity check after stack-graph
 	# refactors or when verifying the Stage wiring is intact.
-	cdk ls '**'
+	$(CDK) ls '**' $(CDK_ENV_ARG)
 
 cdk-diff: ## Preview infra changes against deployed stacks (requires AWS credentials)
 	# Same Stage-nesting trap as cdk-synth and deploy: bare `cdk diff`
 	# walks only the App's direct children and reports no changes for the
 	# three real stacks. Use this as the pre-PR companion to cdk-synth —
 	# synth tells you cdk-nag is happy, diff tells you what would deploy.
-	cdk diff '**'
+	$(CDK) diff '**' $(CDK_ENV_ARG)
 
 cdk-drift: ## Detect drift between deployed resources and what CDK last shipped (requires AWS credentials)
 	# Surfaces resources mutated outside CDK — console edits, manual SDK
 	# calls, neighbor-stack collisions. Load-bearing for this template's
 	# encryption posture: CMK key policies, IAM grants, and CloudTrail
 	# trail config are easy to silently drift and easy to miss.
-	cdk drift '**'
+	$(CDK) drift '**' $(CDK_ENV_ARG)
 
 cdk-revert-drift: ## Deploy AND auto-revert out-of-band drift back to code (requires CDK CLI 2.1110.0+)
 	# The remediation half of cdk-drift: where `cdk drift` only reports
@@ -159,7 +179,7 @@ cdk-revert-drift: ## Deploy AND auto-revert out-of-band drift back to code (requ
 	# also undo a legitimate emergency console change made during an incident.
 	# Keep the default `deploy` predictable; reach for this consciously after
 	# `make cdk-drift` shows what would be reverted.
-	cdk deploy '**' --revert-drift --require-approval never
+	$(CDK) deploy '**' $(CDK_ENV_ARG) --revert-drift --require-approval never
 
 cdk-diagnose: ## Root-cause CloudFormation failures with construct paths and source locations (CDK 2.1120.0+)
 	# The --unstable=diagnose flag gates the command while it's behind the
@@ -167,20 +187,20 @@ cdk-diagnose: ## Root-cause CloudFormation failures with construct paths and sou
 	# Output maps CFN errors back to the construct and the file:line where
 	# it was defined — designed to be parseable by AI agents as well as
 	# humans. Substitute a specific stack name for '**' to narrow scope.
-	cdk --unstable=diagnose diagnose '**'
+	$(CDK) --unstable=diagnose diagnose '**' $(CDK_ENV_ARG)
 
 cdk-gc: ## Inspect (dry-run) unused Lambda/Docker assets in the CDK bootstrap S3/ECR repos
 	# Every `cdk deploy` adds new Lambda zips and container images to the
 	# CDKToolkit bootstrap bucket and ECR repo, but older revisions
 	# accumulate forever. --action=print is dry-run only — it tags isolated
 	# assets and reports what *would* be deleted on a subsequent run, but
-	# deletes nothing. To actually GC, run `cdk --unstable=gc gc` directly:
+	# deletes nothing. To actually GC, run `npx cdk --unstable=gc gc` directly:
 	# the default (--action=full, --confirm=true) prompts interactively
 	# before each deletion. --created-buffer-days=1 (default) skips assets
 	# younger than a day; tune via --created-buffer-days=N for tighter
 	# windows. The --unstable=gc flag gates the command while gc is behind
 	# the unstable feature flag; drop it once gc graduates to stable.
-	cdk --unstable=gc gc --action=print
+	$(CDK) --unstable=gc gc --action=print
 
 cdk-rollback: ## Roll deployed stacks back to their last stable state (use after a partial deploy failure)
 	# Pairs with cdk-diagnose: when a deploy half-fails and CloudFormation
@@ -188,25 +208,25 @@ cdk-rollback: ## Roll deployed stacks back to their last stable state (use after
 	# last good state without manual console intervention. Same '**' trap
 	# as cdk-synth and friends — bare `cdk rollback` only sees the empty
 	# Stage manifest.
-	cdk rollback '**'
+	$(CDK) rollback '**' $(CDK_ENV_ARG)
 
 # The '**' glob is required so CDK descends into the Stage-nested stacks —
 # without it `cdk deploy` only sees the empty Stage manifest and exits with
 # "No stack found in the main cloud assembly". --require-approval never
 # skips the interactive IAM-change prompt; cdk-nag has already gated the
 # change at synth time. Drop the flag for a manual review of every IAM diff.
-deploy: ## Deploy all stacks to us-east-1 (use `cdk deploy '**' -c region=X` for other regions)
-	cdk deploy '**' --require-approval never
+deploy: ## Deploy all stacks to us-east-1 (ENV=<name> for an ephemeral env, -c region=X for other regions)
+	$(CDK) deploy '**' $(CDK_ENV_ARG) --require-approval never
 
 # --force skips the interactive "are you sure?" prompt, mirroring how
 # the deploy target uses --require-approval never. Without --force, the
 # command fails outright in non-TTY contexts (CI, background shells)
 # with "terminal is not attached so we are unable to get a confirmation".
 # If you want the confirmation back for a one-off run, invoke cdk
-# directly: `cdk destroy '**'`. Three stacks are destroyed independently
+# directly: `npx cdk destroy '**'`. Three stacks are destroyed independently
 # — frontend first (consumes the WAF ARN), then backend and WAF.
-destroy: ## Destroy all stacks in us-east-1 (use `cdk destroy '**' --force -c region=X` for other regions)
-	cdk destroy '**' --force
+destroy: ## Destroy all stacks in us-east-1 (ENV=<name> for an ephemeral env, -c region=X for other regions)
+	$(CDK) destroy '**' $(CDK_ENV_ARG) --force
 
 # Region the frontend stack (and its log buckets) live in. Override to match a
 # non-default deploy: `make destroy-clean REGION=ap-southeast-1`.
@@ -214,11 +234,13 @@ REGION ?= us-east-1
 
 # Resolve every S3 bucket in the frontend stack by type (names are CDK-generated,
 # so we can't hardcode them) and empty each. Idempotent: a missing stack or empty
-# bucket is a no-op. Used by destroy-clean below.
+# bucket is a no-op. Used by destroy-clean below. ENVSEG folds the deployment
+# environment into the stack name (HelloWorldFrontend-<env>-<region>) so an
+# ephemeral env's teardown empties its own buckets, not prod's.
 _empty-frontend-buckets:
 	@echo "Emptying frontend-stack S3 buckets in $(REGION)..."
 	@for b in $$(aws cloudformation list-stack-resources \
-		--stack-name HelloWorldFrontend-$(REGION) --region $(REGION) \
+		--stack-name HelloWorldFrontend$(ENVSEG)-$(REGION) --region $(REGION) \
 		--query "StackResourceSummaries[?ResourceType=='AWS::S3::Bucket'].PhysicalResourceId" \
 		--output text 2>/dev/null); do \
 		echo "  emptying s3://$$b"; \
@@ -230,30 +252,34 @@ _empty-frontend-buckets:
 # CloudFormation deleted their (CMK-encrypted) log groups, and the Lambda service
 # re-creates the configured group on delivery — leaving unencrypted,
 # retention-less groups dangling after an otherwise-clean destroy (observed on a
-# live teardown). Conservative prefixes: everything this template creates starts
-# with "HelloWorld" (stack-named groups), "/aws/lambda/HelloWorld" (function
-# groups, including names the Lambda service truncates mid-word), or
-# "aws-waf-logs-HelloWorld" (WAF groups — swept in us-east-1 too because the WAF
-# stack always lives there regardless of REGION). Idempotent; missing groups are
-# no-ops.
+# live teardown). Prefixes are scoped to the FULL stack names of the deployment
+# being torn down — "HelloWorld$(ENVSEG)-$(REGION)" etc. for stack-named groups,
+# "/aws/lambda/<stack-name>" for function groups (including names the Lambda
+# service truncates mid-word — truncation happens at the END, so the prefix
+# still matches), and "aws-waf-logs-<stack-name>" for WAF groups. The env
+# segment in the prefix is what keeps multi-environment accounts safe: a bare
+# "HelloWorld" prefix would also sweep the log groups of every OTHER deployment
+# environment still running in the account. WAF-stack-derived groups are swept
+# in us-east-1 too because the WAF stack always lives there regardless of
+# REGION. Idempotent; missing groups are no-ops.
 _delete-straggler-log-groups:
 	@echo "Sweeping straggler CloudWatch log groups..."
-	@for prefix in "HelloWorld" "/aws/lambda/HelloWorld" "aws-waf-logs-HelloWorld"; do \
-		for lg in $$(aws logs describe-log-groups --log-group-name-prefix "$$prefix" \
-			--region $(REGION) --query "logGroups[].logGroupName" --output text 2>/dev/null); do \
-			echo "  deleting $$lg ($(REGION))"; \
-			aws logs delete-log-group --log-group-name "$$lg" --region $(REGION) 2>/dev/null || true; \
-		done; \
-	done
-	@if [ "$(REGION)" != "us-east-1" ]; then \
-		for prefix in "/aws/lambda/HelloWorldWaf" "aws-waf-logs-HelloWorldWaf"; do \
+	@for base in "HelloWorld$(ENVSEG)-$(REGION)" "HelloWorldFrontend$(ENVSEG)-$(REGION)"; do \
+		for prefix in "$$base" "/aws/lambda/$$base" "aws-waf-logs-$$base"; do \
 			for lg in $$(aws logs describe-log-groups --log-group-name-prefix "$$prefix" \
-				--region us-east-1 --query "logGroups[].logGroupName" --output text 2>/dev/null); do \
-				echo "  deleting $$lg (us-east-1)"; \
-				aws logs delete-log-group --log-group-name "$$lg" --region us-east-1 2>/dev/null || true; \
+				--region $(REGION) --query "logGroups[].logGroupName" --output text 2>/dev/null); do \
+				echo "  deleting $$lg ($(REGION))"; \
+				aws logs delete-log-group --log-group-name "$$lg" --region $(REGION) 2>/dev/null || true; \
 			done; \
 		done; \
-	fi
+	done
+	@for prefix in "HelloWorldWaf$(ENVSEG)-$(REGION)" "/aws/lambda/HelloWorldWaf$(ENVSEG)-$(REGION)" "aws-waf-logs-HelloWorldWaf$(ENVSEG)-$(REGION)"; do \
+		for lg in $$(aws logs describe-log-groups --log-group-name-prefix "$$prefix" \
+			--region us-east-1 --query "logGroups[].logGroupName" --output text 2>/dev/null); do \
+			echo "  deleting $$lg (us-east-1)"; \
+			aws logs delete-log-group --log-group-name "$$lg" --region us-east-1 2>/dev/null || true; \
+		done; \
+	done
 
 # CloudFront / S3 / CloudTrail log delivery is ASYNCHRONOUS, so a log file can land
 # in the access-log (or CloudTrail) bucket AFTER cdk's auto_delete_objects empties
@@ -266,18 +292,45 @@ _delete-straggler-log-groups:
 # Re-running the whole target is always safe — every step is idempotent.
 destroy-clean: ## Empty async-log buckets, destroy all stacks, sweep straggler log groups. REGION=us-east-1 default.
 	@$(MAKE) _empty-frontend-buckets REGION=$(REGION)
-	cdk destroy '**' --force -c region=$(REGION) || { \
+	$(CDK) destroy '**' $(CDK_ENV_ARG) --force -c region=$(REGION) || { \
 		echo "destroy hit a late-arriving log straggler — emptying again and retrying once..."; \
 		$(MAKE) _empty-frontend-buckets REGION=$(REGION); \
-		cdk destroy '**' --force -c region=$(REGION); \
+		$(CDK) destroy '**' $(CDK_ENV_ARG) --force -c region=$(REGION); \
 	}
 	@$(MAKE) _delete-straggler-log-groups REGION=$(REGION)
 
 lint: ## Run all pre-commit hooks (ruff, mypy, pylint, bandit, xenon, pip-audit)
 	uv run pre-commit run --all-files
 
+lint-docs: ## Lint Markdown files (README, TODO, docs/) with markdownlint
+	# Rules live in .markdownlint.yaml. CHANGELOG.md is excluded — it is
+	# generated by git-cliff, so style nits there are fixed in cliff.toml,
+	# not by hand-editing generated output.
+	npx markdownlint --config .markdownlint.yaml "*.md" "docs/**/*.md" --ignore CHANGELOG.md
+
 format: ## Format code with ruff
 	uv run ruff format .
+
+# Mirrors the lambda/requirements.txt drift gate in .github/workflows/ci.yml:
+# Dependabot's uv ecosystem regenerates pyproject.toml + uv.lock but does not
+# know about the exported requirements file that PythonFunction bundles into
+# the deployed Lambda. Run locally before pushing a dependency change.
+check-lock: ## Verify lambda/requirements.txt is in sync with uv.lock (fix with `make lock`)
+	@uv export --only-group lambda --no-emit-project --no-header --format requirements.txt -o /tmp/expected-requirements.txt
+	@diff -q /tmp/expected-requirements.txt lambda/requirements.txt >/dev/null \
+		&& echo "lambda/requirements.txt is in sync with uv.lock" \
+		|| { echo "lambda/requirements.txt is OUT OF SYNC with uv.lock — run 'make lock' and commit the result"; \
+			diff /tmp/expected-requirements.txt lambda/requirements.txt || true; exit 1; }
+
+# One-shot local mirror of everything CI gates on, in CI's order: the
+# requirements drift check, every pre-commit hook (ruff/mypy/pylint/bandit/
+# xenon/pip-audit), both-venv typechecking, markdown lint, unit tests with the
+# 100% coverage gate, the CDK assertion suite (including the in-process
+# cdk-nag annotations gate), the authoritative CLI synth (needs Docker for
+# Lambda bundling), and the committed-OpenAPI drift check. Run before pushing;
+# a clean `make pr` should mean a green CI run.
+pr: check-lock lint typecheck lint-docs test test-cdk cdk-synth compare-openapi ## Run every CI gate locally (lint, typecheck, tests, synth, OpenAPI drift)
+	@echo "All local CI gates passed."
 
 typecheck: ## Run mypy type checking (CDK side in .venv, Lambda runtime + scripts in .venv-lambda)
 	# .venv has aws-cdk-lib + boto3-stubs but not Powertools (attrs conflict),
@@ -319,6 +372,23 @@ docs-serve: ## Regenerate OpenAPI spec and start the Zensical dev server with ho
 	$(LAMBDA_RUN) python scripts/generate_openapi.py
 	uv run zensical serve
 
+openapi: ## Regenerate the committed OpenAPI spec (docs/openapi.json) from lambda/app.py
+	# The spec is COMMITTED (not just a docs-build artifact) so PR diffs show
+	# API-contract changes and CI can gate on drift and breaking changes.
+	# Run this after touching routes, models, or response metadata.
+	$(LAMBDA_RUN) python scripts/generate_openapi.py
+
+compare-openapi: ## Fail if the committed docs/openapi.json is stale (regenerate with `make openapi`)
+	# Mirrors the CI drift gate: regenerate into a temp location and compare
+	# byte-for-byte with the committed spec. Generation is hermetic (the
+	# generator pins its own env vars), so any diff means the code changed
+	# without `make openapi` being run.
+	$(LAMBDA_RUN) python scripts/generate_openapi.py --out-path /tmp/openapi-latest.json
+	@cmp --silent /tmp/openapi-latest.json docs/openapi.json \
+		&& echo "docs/openapi.json is up to date" \
+		|| { echo "docs/openapi.json is STALE — run 'make openapi' and commit the result"; \
+			diff /tmp/openapi-latest.json docs/openapi.json || true; exit 1; }
+
 # =============================================================================
 # Dependency management
 # =============================================================================
@@ -350,6 +420,15 @@ lock: ## Regenerate uv.lock and lambda/requirements.txt from pyproject.toml
 upgrade: ## Upgrade all dependencies to latest versions older than COOLDOWN_DAYS days
 	uv lock --upgrade --exclude-newer $(COOLDOWN_CUTOFF)
 	uv export --only-group lambda --no-emit-project --no-header --format requirements.txt -o lambda/requirements.txt
+	# pre-commit hook revs and the npm-side pins (CDK CLI, markdownlint) ride
+	# along so one command refreshes every dependency surface. NOTE: neither
+	# pre-commit autoupdate nor npm honours the PyPI cooldown above — those
+	# bumps land at whatever upstream just released. Dependabot's cooldown
+	# still applies to its own PRs; for a cooldown-conscious local refresh,
+	# review these two diffs (release dates) before committing.
+	uv run pre-commit autoupdate
+	npm update --save-dev
+	@echo "Upgraded: uv.lock, lambda/requirements.txt, .pre-commit-config.yaml revs, package(-lock).json"
 
 # Wrapper around scripts/deps_merge.sh — see the file header for the full
 # step list. Pass PR=N to handle a single PR; omit to process every open
@@ -364,7 +443,9 @@ deps-merge: ## Process Dependabot PRs (rebase + lock + push + arm auto-merge). U
 # =============================================================================
 
 clean: ## Remove build artifacts, caches, and coverage files (preserves venvs)
-	rm -rf site htmlcov .coverage report.html .pytest_cache .mypy_cache .ruff_cache cdk.out
+	# .coverage* (glob, not bare .coverage) also catches the ".coverage 2"-style
+	# suffixed files pytest-cov leaves behind when parallel runs race on the name.
+	rm -rf site htmlcov .coverage* report.html .pytest_cache .mypy_cache .ruff_cache cdk.out
 	find . -type d -name __pycache__ -exec rm -rf {} +
 
 # Separate from `clean` because re-installing both venvs takes minutes (CDK

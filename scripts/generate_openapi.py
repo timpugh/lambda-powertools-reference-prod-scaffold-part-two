@@ -19,6 +19,7 @@ runtime: exposing it via API Gateway would publish the full API surface to
 any caller, which we do not want for a reference service.
 """
 
+import argparse
 import copy
 import json
 import os
@@ -53,10 +54,14 @@ from aws_lambda_powertools.event_handler.openapi.models import Server, Tag  # no
 
 from app import app  # noqa: E402
 
-# Write into docs/ so Zensical (which treats the docs/ tree as input and
-# copies non-markdown assets verbatim into the site) picks it up alongside
-# docs/api.html, which references it as a sibling.
-OUTPUT_PATH = REPO_ROOT / "docs" / "openapi.json"
+# Default output lives in docs/ so Zensical (which treats the docs/ tree as
+# input and copies non-markdown assets verbatim into the site) picks it up
+# alongside docs/api.html, which references it as a sibling. The file is
+# committed: PR diffs then show API-contract changes, and CI gates on both
+# drift (`make compare-openapi`) and breaking changes (oasdiff). The
+# --out-path flag exists for those gates — they regenerate into a temp file
+# and compare against the committed copy.
+DEFAULT_OUTPUT_PATH = REPO_ROOT / "docs" / "openapi.json"
 
 DESCRIPTION = """\
 Reference serverless API built on AWS Lambda Powertools, deployed behind
@@ -111,6 +116,15 @@ def _inject_apigateway_extensions(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate the OpenAPI spec from lambda/app.py")
+    parser.add_argument(
+        "--out-path",
+        type=Path,
+        default=DEFAULT_OUTPUT_PATH,
+        help=f"Where to write the spec (default: {DEFAULT_OUTPUT_PATH})",
+    )
+    args = parser.parse_args()
+
     spec = app.get_openapi_json_schema(
         title="Hello World API",
         version="1.0.0",
@@ -132,9 +146,10 @@ def main() -> None:
         ],
     )
     # Re-serialize through json to get stable, human-readable formatting that
-    # diffs cleanly in PRs if the spec is ever committed.
+    # diffs cleanly in PRs — the spec is committed, so format stability is
+    # what keeps the CI drift gate byte-for-byte meaningful.
     spec_dict = _inject_apigateway_extensions(json.loads(spec))
-    OUTPUT_PATH.write_text(json.dumps(spec_dict, indent=2) + "\n")
+    args.out_path.write_text(json.dumps(spec_dict, indent=2) + "\n")
 
 
 if __name__ == "__main__":

@@ -138,8 +138,9 @@ pip-delete-this-directory.txt
 # Unit test / coverage reports
 htmlcov/
 .tox/
-.coverage
-.coverage.*
+# .coverage* (not bare .coverage) also matches the ".coverage 2"-style
+# space-suffixed files pytest-cov leaves behind when parallel runs race.
+.coverage*
 .cache
 .pytest_cache/
 nosetests.xml
@@ -160,7 +161,10 @@ instance/
 
 # Documentation build output
 site/
-docs/openapi.json
+# docs/openapi.json is intentionally NOT ignored — it is committed so PR
+# diffs show API-contract changes and CI can gate on spec drift (`make
+# compare-openapi`) and breaking changes (oasdiff). Regenerate with
+# `make openapi` after touching routes or models.
 
 # PyBuilder
 target/
@@ -250,3 +254,6 @@ report.html
 
 # Claude Code local memory
 .claude/
+
+# Node tooling (CDK CLI + markdownlint via package.json)
+node_modules/

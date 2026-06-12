@@ -1,0 +1,195 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Hello World API",
+    "description": "Reference serverless API built on AWS Lambda Powertools, deployed behind\nAPI Gateway, CloudFront, and AWS WAF.\n\nThe spec on this page is generated at documentation-build time from the\nlive Pydantic models and route decorators in `lambda/app.py`. Any change\nto a route, a request body model, or a return-type annotation appears\nhere on the next `make docs` run.\n\nEach operation carries an `x-amazon-apigateway-integration` block showing\nthe AWS_PROXY integration with Lambda that the CDK stack provisions. The\nURI uses literal `{region}` and `{lambdaArn}` placeholders \u2014 the deployed\nAPI is built by CDK, not imported from this file, so readers can substitute\nthose if they want to `aws apigateway import-rest-api` the spec elsewhere.\n",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://{apiId}.execute-api.{region}.amazonaws.com/Prod",
+      "description": "API Gateway stage (substitute your deployed apiId and region)"
+    }
+  ],
+  "paths": {
+    "/hello": {
+      "get": {
+        "tags": [
+          "Greeting"
+        ],
+        "summary": "Return a greeting",
+        "description": "Returns the greeting string configured in SSM Parameter Store. When the `enhanced_greeting` AppConfig feature flag is enabled for the caller's source IP, the response includes the feature flag's configured suffix. Requires an `Idempotency-Key` header; requests without one are rejected with 400 before this route runs.",
+        "operationId": "hello_hello_get",
+        "responses": {
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The resolved greeting.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HelloResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing Idempotency-Key header.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissingIdempotencyKeyResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Greeting could not be fetched from SSM Parameter Store.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InternalErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "x-amazon-apigateway-integration": {
+          "type": "aws_proxy",
+          "httpMethod": "POST",
+          "uri": "arn:aws:apigateway:{region}:lambda:path/2015-03-31/functions/{lambdaArn}/invocations",
+          "passthroughBehavior": "when_no_match"
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HelloResponse": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Greeting from SSM Parameter Store, optionally suffixed when the enhanced_greeting flag is on.",
+            "examples": [
+              "hello world",
+              "hello world - enhanced mode enabled"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "title": "HelloResponse",
+        "description": "Response body for GET /hello."
+      },
+      "InternalErrorResponse": {
+        "properties": {
+          "statusCode": {
+            "type": "integer",
+            "title": "Statuscode",
+            "description": "HTTP status code echoed in the body.",
+            "default": 500
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Error description.",
+            "examples": [
+              "Failed to fetch greeting"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "message"
+        ],
+        "title": "InternalErrorResponse",
+        "description": "Body of the 500 produced by Powertools' ServiceError handling.\n\nWhen ``hello`` raises ``InternalServerError`` (e.g. the SSM read fails),\nthe resolver serialises it as ``{\"statusCode\": 500, \"message\": ...}`` \u2014\ndocumented here so spec consumers see the failure shape, not just the 200."
+      },
+      "MissingIdempotencyKeyResponse": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Explanation of the rejected request.",
+            "default": "Idempotency-Key header is required"
+          }
+        },
+        "type": "object",
+        "title": "MissingIdempotencyKeyResponse",
+        "description": "Body of the 400 returned when the required Idempotency-Key header is absent.\n\nShape must match the hand-built response in ``lambda_handler`` \u2014 that 400 is\nconstructed outside the Powertools resolver (the idempotency layer rejects\nthe request before the resolver runs), so this model exists purely to\ndocument the contract in the generated OpenAPI spec."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "ResponseValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "ResponseValidationError"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "Greeting",
+      "description": "Endpoints that return the configured greeting."
+    }
+  ]
+}
