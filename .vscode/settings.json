@@ -25,6 +25,7 @@
         }
     },
 
+    "ruff.importStrategy": "fromEnvironment",
     "ruff.configuration": "${workspaceFolder}/pyproject.toml",
 
     "mypy-type-checker.importStrategy": "fromEnvironment",
@@ -32,6 +33,7 @@
         "--config-file=${workspaceFolder}/pyproject.toml"
     ],
 
+    "pylint.importStrategy": "fromEnvironment",
     "pylint.args": [
         "--rcfile=${workspaceFolder}/pyproject.toml"
     ],
