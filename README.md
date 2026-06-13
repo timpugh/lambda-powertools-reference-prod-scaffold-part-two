@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/timpugh/lambda-powertools-reference/actions/workflows/ci.yml/badge.svg)](https://github.com/timpugh/lambda-powertools-reference/actions/workflows/ci.yml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/timpugh/lambda-powertools-reference/badge)](https://securityscorecards.dev/viewer/?uri=github.com/timpugh/lambda-powertools-reference)
+[![CodeQL](https://github.com/timpugh/lambda-powertools-reference/actions/workflows/codeql.yml/badge.svg)](https://github.com/timpugh/lambda-powertools-reference/actions/workflows/codeql.yml)
 [![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/downloads/)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://timpugh.github.io/lambda-powertools-reference/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -1385,7 +1386,7 @@ Automated scoring/scanning of the repo, with score badges added to the badge row
 | Check | Status | What it adds | Score badge |
 |---|---|---|---|
 | [OpenSSF Scorecard](https://github.com/ossf/scorecard) | **Live** — `.github/workflows/scorecard.yml` (`publish_results: true`) | Scores the repo against supply-chain best practices (pinned actions, token permissions, branch protection, etc.) and publishes to the OpenSSF API | Live in the badge row above (numeric score, auto-updates) |
-| [CodeQL](https://github.com/github/codeql) | **Live** — `.github/workflows/codeql.yml` | Dataflow/taint static analysis surfaced as code-scanning alerts | None — CodeQL reports alerts, not a numeric score, so there's no score badge to add |
+| [CodeQL](https://github.com/github/codeql) | **Live** — `.github/workflows/codeql.yml` | Dataflow/taint static analysis surfaced as code-scanning alerts | Workflow-status badge in the row above (pass/fail of the scan — CodeQL reports alerts, not a numeric score, so there's no number to publish) |
 | [SLSA](https://github.com/slsa-framework/slsa) | **Planned** | Build provenance/attestation for release artifacts, raising supply-chain integrity to a verifiable SLSA level | An SLSA level badge will be added once provenance is generated on release |
 | [Codecov](https://github.com/codecov/codecov-action) | **Planned** | Hosted coverage tracking with per-PR coverage diffs and a coverage-percentage badge (CI currently uploads the coverage report as a plain artifact — see the `test` job — rather than to a hosted service) | A coverage badge will be added once Codecov is integrated |
 
