@@ -257,9 +257,3 @@ report.html
 
 # Node tooling (CDK CLI + markdownlint via package.json)
 node_modules/
-
-# Release artifact built by `make lambda-bundle` (deployable Lambda zip +
-# its staging dir). Produced fresh in CI for SLSA-attested releases; never
-# committed.
-.lambda-bundle/
-hello-world-lambda*.zip

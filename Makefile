@@ -48,7 +48,7 @@ CDK_ENV_ARG := $(if $(ENV),-c env=$(ENV))
 	cdk-synth cdk-notices cdk-deprecations \
 	cdk-ls cdk-diff cdk-drift cdk-revert-drift cdk-diagnose cdk-gc cdk-rollback \
 	deploy destroy destroy-clean _empty-frontend-buckets _delete-straggler-log-groups \
-	docs docs-open docs-serve openapi compare-openapi lambda-bundle lock upgrade deps-merge clean clean-venvs
+	docs docs-open docs-serve openapi compare-openapi lock upgrade deps-merge clean clean-venvs
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -151,32 +151,6 @@ coverage: ## Combined coverage report across both venvs (hello_world/ + lambda/)
 	uv run python -m coverage report
 	uv run python -m coverage html
 	open htmlcov/index.html
-
-# =============================================================================
-# Release artifact
-# =============================================================================
-#
-# Build the deployable Lambda bundle as a standalone zip: the handler plus its
-# pinned dependencies resolved for the Lambda's target (arm64 / Graviton,
-# Python 3.14), the same shape CDK's PythonFunction deploys. It is emitted as a
-# release artifact so the release workflow can attach it to the GitHub Release
-# AND generate SLSA Build L3 provenance over it (slsa-github-generator hashes
-# this exact file). Defining it as a make target keeps the release build
-# locally reproducible — you can build and inspect the attested artifact
-# without cutting a tag — and keeps the workflow a thin caller (DRY).
-#
-# --python-platform aarch64-manylinux2014 + --only-binary :all: force arm64
-# manylinux wheels for every dependency (matching the deployed runtime) and
-# refuse any sdist that would otherwise build a host-arch (amd64) binary — so
-# the bundle is correct regardless of the machine that builds it.
-LAMBDA_BUNDLE ?= hello-world-lambda.zip
-lambda-bundle: ## Build the deployable Lambda bundle zip (handler + arm64 deps) — release/attestation artifact
-	rm -rf .lambda-bundle "$(LAMBDA_BUNDLE)"
-	uv pip install --target .lambda-bundle --python-platform aarch64-manylinux2014 \
-		--python-version 3.14 --only-binary :all: -r lambda/requirements.txt
-	cp lambda/app.py .lambda-bundle/
-	cd .lambda-bundle && zip -qr "$(CURDIR)/$(LAMBDA_BUNDLE)" .
-	@echo "Built $(LAMBDA_BUNDLE) ($$(du -h "$(LAMBDA_BUNDLE)" | cut -f1))"
 
 # =============================================================================
 # Code quality
@@ -551,7 +525,6 @@ clean: ## Remove build artifacts, caches, and coverage files (preserves venvs)
 	# .coverage* (glob, not bare .coverage) also catches the ".coverage 2"-style
 	# suffixed files pytest-cov leaves behind when parallel runs race on the name.
 	rm -rf site htmlcov .coverage* report.html .pytest_cache .mypy_cache .ruff_cache cdk.out
-	rm -rf .lambda-bundle hello-world-lambda*.zip
 	find . -type d -name __pycache__ -exec rm -rf {} +
 
 # Separate from `clean` because re-installing both venvs takes minutes (CDK

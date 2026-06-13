@@ -1,17 +1,11 @@
 name: Release
 
-# Triggered when an annotated v* tag is pushed (see README "Cutting a release").
-# Three jobs run in sequence:
-#   publish    — create the GitHub Release from the annotated tag (notes-from-tag)
-#   build      — build the deployable Lambda bundle, attach it to the release,
-#                and emit its base64 SHA-256 subject for provenance
-#   provenance — generate signed, non-falsifiable SLSA Build L3 provenance over
-#                that bundle and attach the .intoto.jsonl to the release
-#
-# The result is a release whose Lambda bundle ships with verifiable provenance
-# (who built it, from which commit, in which workflow) — earning the SLSA
-# Level 3 badge in the README. Version selection, changelog regeneration, and
-# tagging stay manual and git-cliff-driven by design.
+# Automates the final step of the release recipe (README "Cutting a release"):
+# when an annotated v* tag is pushed, publish the GitHub Release from the tag
+# message. Version selection, changelog regeneration, and tagging stay manual
+# and git-cliff-driven by design — this workflow only removes the step where a
+# pushed tag sits without a published release until someone remembers to run
+# `gh release create`.
 
 on:
   push:
@@ -21,12 +15,12 @@ permissions:
   contents: read
 
 jobs:
-  # 1) Publish the GitHub Release from the annotated tag (unchanged behavior).
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: write  # create the release
+
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
         with:
@@ -46,65 +40,3 @@ jobs:
           # annotated tag body, the release is marked latest, and --verify-tag
           # refuses to invent a tag that does not exist on the remote.
           gh release create "$GITHUB_REF_NAME" --notes-from-tag --latest --verify-tag
-
-  # 2) Build the deployable Lambda bundle, attach it to the release, and output
-  #    its base64-encoded SHA-256 subject for the provenance generator below.
-  build:
-    needs: [publish]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write  # upload the bundle asset to the release
-    outputs:
-      # base64(sha256sum <bundle>) — the subject the SLSA generator attests.
-      hashes: ${{ steps.hash.outputs.hashes }}
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
-
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
-        with:
-          enable-cache: true
-
-      # The bundle pins arm64/py3.14 wheels; make uv resolve against a managed
-      # 3.14 interpreter so the build is independent of the runner's Python.
-      - name: Install Python 3.14 (for uv resolution)
-        run: uv python install 3.14
-
-      # Same target the README/Makefile document — keeps the release build
-      # locally reproducible (`make lambda-bundle`) and this workflow a thin caller.
-      - name: Build Lambda bundle
-        run: make lambda-bundle LAMBDA_BUNDLE="hello-world-lambda-${GITHUB_REF_NAME}.zip"
-
-      # base64 -w0 is GNU base64 (Ubuntu runner) — single-line, no wrapping, as
-      # the generic generator requires for base64-subjects.
-      - name: Generate provenance subject
-        id: hash
-        run: |
-          echo "hashes=$(sha256sum "hello-world-lambda-${GITHUB_REF_NAME}.zip" | base64 -w0)" >> "$GITHUB_OUTPUT"
-
-      - name: Attach bundle to the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" "hello-world-lambda-${GITHUB_REF_NAME}.zip" --clobber
-
-  # 3) Generate SLSA Build Level 3 provenance for the bundle and attach the
-  #    signed .intoto.jsonl to the release.
-  #
-  # PINNING EXCEPTION: every other action in this repo is pinned to a 40-char
-  # commit SHA (see README "SHA-pinned GitHub Actions"). This ONE reference is
-  # intentionally a version tag, because the slsa-github-generator reusable
-  # workflow refuses to run when referenced by SHA — it inspects its own ref to
-  # locate the matching builder and to record a verifiable builder ID in the
-  # provenance, and a SHA ref breaks that self-identification by design. So the
-  # generator's own security model requires the tag form. Bump deliberately;
-  # Dependabot's github-actions ecosystem tracks reusable-workflow tags too.
-  provenance:
-    needs: [build]
-    permissions:
-      actions: read    # read the workflow run to build the provenance statement
-      id-token: write  # keyless Sigstore signing via GitHub OIDC
-      contents: write  # attach the provenance asset to the release
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
-    with:
-      base64-subjects: "${{ needs.build.outputs.hashes }}"
-      upload-assets: true  # attach <bundle>.intoto.jsonl to the release for this tag
