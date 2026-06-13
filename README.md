@@ -3,6 +3,7 @@
 [![CI](https://github.com/timpugh/lambda-powertools-reference/actions/workflows/ci.yml/badge.svg)](https://github.com/timpugh/lambda-powertools-reference/actions/workflows/ci.yml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/timpugh/lambda-powertools-reference/badge)](https://securityscorecards.dev/viewer/?uri=github.com/timpugh/lambda-powertools-reference)
 [![CodeQL](https://github.com/timpugh/lambda-powertools-reference/actions/workflows/codeql.yml/badge.svg)](https://github.com/timpugh/lambda-powertools-reference/actions/workflows/codeql.yml)
+[![SLSA 3](https://slsa.dev/images/gh-badge-level3.svg)](https://slsa.dev/spec/v1.0/levels#build-l3)
 [![Python 3.14](https://img.shields.io/badge/python-3.14-blue.svg)](https://www.python.org/downloads/)
 [![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://timpugh.github.io/lambda-powertools-reference/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
@@ -1344,7 +1345,7 @@ This repo layers six defenses against the supply-chain attack patterns described
 
 **1. Release cooldown.** Every ecosystem in `dependabot.yml` carries a `cooldown:` block that makes Dependabot wait a few days after a release before opening a PR. Fresh releases are the window in which malicious versions (tag hijacks, compromised maintainer accounts, typo-squats, the `xz-utils`/`nx`/`tj-actions/changed-files` class of incidents) typically get caught and yanked. The tiered schedule is 3 days for patches, 7 for minors, 14 for majors — larger jumps wait longer to let bugs surface.
 
-**2. SHA-pinned GitHub Actions.** Every `uses:` reference in `.github/workflows/` is pinned to a 40-character commit SHA with the version in a trailing comment:
+**2. SHA-pinned GitHub Actions.** Every `uses:` reference in `.github/workflows/` is pinned to a 40-character commit SHA with the version in a trailing comment — with exactly one deliberate exception, the `slsa-github-generator` reusable workflow in `release.yml`, which *must* be referenced by version tag because it self-identifies from its ref to produce verifiable provenance (see [Code scoring and attestation](#code-scoring-and-attestation)):
 
 ```yaml
 - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -1381,16 +1382,18 @@ This project uses Dependabot because it is the GitHub-native default and already
 
 ### Code scoring and attestation
 
-Automated scoring/scanning of the repo, with score badges added to the badge row at the top of this README as each check goes live and publishes one. Two of the four below are already wired; the other two are planned, and their badges will join the row when they are.
+Automated scoring/scanning and supply-chain attestation, with badges in the row at the top of this README. Three of the four below are wired; Codecov is planned, and its badge will join the row when it is.
 
-| Check | Status | What it adds | Score badge |
+| Check | Status | What it adds | Badge |
 |---|---|---|---|
 | [OpenSSF Scorecard](https://github.com/ossf/scorecard) | **Live** — `.github/workflows/scorecard.yml` (`publish_results: true`) | Scores the repo against supply-chain best practices (pinned actions, token permissions, branch protection, etc.) and publishes to the OpenSSF API | Live in the badge row above (numeric score, auto-updates) |
 | [CodeQL](https://github.com/github/codeql) | **Live** — `.github/workflows/codeql.yml` | Dataflow/taint static analysis surfaced as code-scanning alerts | Workflow-status badge in the row above (pass/fail of the scan — CodeQL reports alerts, not a numeric score, so there's no number to publish) |
-| [SLSA](https://github.com/slsa-framework/slsa) | **Planned** | Build provenance/attestation for release artifacts, raising supply-chain integrity to a verifiable SLSA level | An SLSA level badge will be added once provenance is generated on release |
+| [SLSA](https://github.com/slsa-framework/slsa) | **Live** — `.github/workflows/release.yml` via [slsa-github-generator](https://github.com/slsa-framework/slsa-github-generator) | Signed, non-falsifiable **Build Level 3** provenance over the deployable Lambda bundle (`make lambda-bundle`), attached to each GitHub Release as a `.intoto.jsonl` alongside the bundle | SLSA Level 3 badge in the row above (provenance first generates on the next `vX.Y.Z` tag) |
 | [Codecov](https://github.com/codecov/codecov-action) | **Planned** | Hosted coverage tracking with per-PR coverage diffs and a coverage-percentage badge (CI currently uploads the coverage report as a plain artifact — see the `test` job — rather than to a hosted service) | A coverage badge will be added once Codecov is integrated |
 
-These are reference-architecture niceties, not gates: the enforced quality bars remain the CI jobs, the cdk-nag packs, and the 100% unit-coverage gate documented above. SLSA and Codecov are tracked here (and in `TODO.md`) so a fork can wire them when it has real release artifacts and a coverage-history need.
+These are reference-architecture demonstrations as much as gates — the enforced quality bars remain the CI jobs, the cdk-nag packs, and the 100% unit-coverage gate documented above. **On SLSA specifically:** provenance is most valuable to downstream *consumers* who verify an artifact before running it; this repo isn't consumed as a published package, so the attested Lambda bundle is primarily a worked example of wiring Build L3 into a tag-driven release — but it is genuine (verify with `gh attestation verify hello-world-lambda-<ver>.zip --repo timpugh/lambda-powertools-reference`, or the SLSA verifier against the `.intoto.jsonl`). Codecov stays tracked here and in `TODO.md` for a fork with a coverage-history need.
+
+> **One deliberate pinning exception.** The SLSA generator is referenced by version tag (`@v2.1.0`), not a commit SHA — the only `uses:` in the repo that isn't SHA-pinned (see [supply-chain hardening](#supply-chain-hardening) #2). The `slsa-github-generator` reusable workflow refuses to run when referenced by SHA: it inspects its own ref to locate the matching builder and to record a verifiable builder ID in the provenance, so the tag form is required by its security model, not a lapse in ours. OpenSSF Scorecard's Pinned-Dependencies check will dock a fraction for it; that's the accepted trade for real Build L3 provenance.
 
 ## Project dependencies
 
