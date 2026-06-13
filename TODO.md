@@ -78,6 +78,8 @@ The hard gates a fork needs to clear before customer traffic touches it. Most it
 - [ ] **CDK diff on PRs** — run `cdk diff` in CI on pull requests to surface infrastructure changes before merge
 - [x] **CDK synth in CI** — `cdk-check` CI job runs `cdk synth` (catching unsuppressed cdk-nag findings) and `aws_cdk.assertions.Template` tests that verify key security properties of each synthesized stack
 - [ ] **Live integration tests in CI** — run API Gateway and CloudFront integration tests against a deployed dev stack as part of the CI pipeline (blocked on Deploy workflow above)
+- [ ] **[SLSA](https://github.com/slsa-framework/slsa) build provenance** — generate signed provenance/attestation for release artifacts so the supply chain reaches a verifiable SLSA level, with a level badge in the README. Wire once releases publish real artifacts (the [SLSA GitHub generator](https://github.com/slsa-framework/slsa-github-generator) plugs into the existing `release.yml` tag workflow). See README "Code scoring and attestation".
+- [ ] **[Codecov](https://github.com/codecov/codecov-action) coverage tracking** — replace the plain coverage-report artifact upload in the `test` job with `codecov/codecov-action` for hosted coverage history, per-PR coverage diffs, and a coverage-percentage badge. Needs a `CODECOV_TOKEN` repo secret. See README "Code scoring and attestation".
 
 ## Security
 
