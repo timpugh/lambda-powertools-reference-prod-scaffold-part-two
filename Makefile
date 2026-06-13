@@ -43,7 +43,7 @@ ENV ?=
 ENVSEG := $(if $(ENV),-$(ENV))
 CDK_ENV_ARG := $(if $(ENV),-c env=$(ENV))
 
-.PHONY: help install install-cdk install-lambda doctor test test-cdk test-integration \
+.PHONY: help install install-cdk install-lambda doctor test test-cdk test-integration coverage \
 	lint lint-docs format typecheck security check-lock pr \
 	cdk-synth cdk-notices cdk-deprecations \
 	cdk-ls cdk-diff cdk-drift cdk-revert-drift cdk-diagnose cdk-gc cdk-rollback \
@@ -127,6 +127,30 @@ test-integration: ## Run integration tests against a deployed stack (uses .venv-
 	# warm-latency test makes 4 sequential HTTP calls with 10s client timeouts
 	# and can exceed 30s on a degraded network without anything being wrong.
 	$(LAMBDA_RUN) pytest tests/integration -v --override-ini="addopts=" --timeout=120
+
+# Combined coverage across BOTH venvs in one report. The editor's Test panel
+# can't produce a single cross-venv number on its own — each "Run with
+# Coverage" loads one .coverage data file, and the multi-root global run's
+# per-folder line highlighting is subject to an upstream bug
+# (microsoft/vscode-python#25643). This target sidesteps both: it runs the CDK
+# suite under .venv and the unit suite under .venv-lambda, each appending into
+# ONE shared .coverage (--cov-append, no erase between runs), then renders a
+# single HTML report spanning hello_world/ (covered by the CDK tests) and
+# lambda/ (covered by the unit tests). --override-ini=addopts= drops the global
+# unit-only flags (--cov=lambda, the 100% gate, -n auto) so this run sets its
+# own --cov targets and is NOT gated — the combined total is informational
+# (hello_world/ carries intentional uncovered defensive lines), while the 100%
+# lambda/ gate stays enforced by `make test` and CI. Integration tests are
+# excluded: they need a live stack. coverage is invoked via `python -m` so it
+# resolves from each venv's pytest-cov install without relying on a console
+# script on PATH.
+coverage: ## Combined coverage report across both venvs (hello_world/ + lambda/), opens HTML
+	rm -f .coverage
+	uv run pytest tests/cdk --override-ini="addopts=" --cov=hello_world --cov=lambda --cov-branch --cov-append -q
+	$(LAMBDA_RUN) pytest tests/unit --override-ini="addopts=" --cov=hello_world --cov=lambda --cov-branch --cov-append -q
+	uv run python -m coverage report
+	uv run python -m coverage html
+	open htmlcov/index.html
 
 # =============================================================================
 # Code quality
