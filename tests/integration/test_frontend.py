@@ -15,9 +15,13 @@ Override for a different region:
 
 import os
 
-import boto3
 import pytest
 import requests
+
+# Same guard as test_api_gateway.py: boto3 only exists in .venv-lambda, and
+# root-interpreter (.venv) test discovery must collect this module as skipped
+# rather than erroring.
+boto3 = pytest.importorskip("boto3", reason="boto3 not installed — integration tests run in .venv-lambda")
 
 
 class TestFrontend:

@@ -17,8 +17,19 @@ import json
 from pathlib import Path
 
 import pytest
-from aws_lambda_powertools.utilities.feature_flags import SchemaValidator
-from aws_lambda_powertools.utilities.feature_flags.exceptions import SchemaValidationError
+
+# Powertools lives in .venv-lambda only. The other unit tests reach it through
+# the lazy lambda_app_module fixture so collection stays clean in the CDK-side
+# .venv (cdk-check CI job, VS Code root-folder test discovery); this module
+# imports it directly, so it needs the same guard tests/cdk uses — skip, don't
+# error, where Powertools is absent. The assignment form (rather than re-import
+# statements after the guard) keeps ruff's E402 check enabled for this file.
+_feature_flags = pytest.importorskip(
+    "aws_lambda_powertools.utilities.feature_flags",
+    reason="Powertools not installed — this suite runs in .venv-lambda",
+)
+SchemaValidator = _feature_flags.SchemaValidator
+SchemaValidationError = _feature_flags.exceptions.SchemaValidationError
 
 FLAGS_PATH = Path(__file__).resolve().parents[2] / "hello_world" / "feature_flags.json"
 

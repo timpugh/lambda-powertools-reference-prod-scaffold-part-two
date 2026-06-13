@@ -174,6 +174,16 @@ init_forbid_extra = true               # flag unknown keyword args to model cons
 init_typed = true                      # type-check constructor args instead of accepting Any
 warn_required_dynamic_aliases = true   # warn when a required field uses a dynamic alias mypy can't verify
 
+# Tests are deliberately outside the mypy gate: the pre-commit hook excludes
+# tests/ and `make typecheck` only passes hello_world/, lambda/, and scripts/.
+# Encoding that policy here (not just in hook excludes) keeps the editor's
+# mypy extension — which type-checks any opened file against this config —
+# in agreement with the CLI gates, instead of flagging strict-mode errors
+# (missing annotations, requests stubs) the project never enforces on tests.
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
+
 # =============================================================================
 # Pylint — design and complexity checks that complement ruff's style checks
 # Disabled rules are handled by ruff or produce false positives in this project.

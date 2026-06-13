@@ -15,9 +15,15 @@ The stack name is read from the ``AWS_BACKEND_STACK_NAME`` environment variable
 import os
 import uuid
 
-import boto3
 import pytest
 import requests
+
+# boto3 lives in the `lambda` dependency group (.venv-lambda), not the CDK-side
+# .venv — same split the unit conftest and tests/cdk handle with lazy loading /
+# importorskip. Without this guard, VS Code's Testing panel (which discovers
+# tests/ under the root .venv interpreter) fails collection with
+# "Missing Module: boto3" instead of listing this suite as skipped.
+boto3 = pytest.importorskip("boto3", reason="boto3 not installed — integration tests run in .venv-lambda")
 
 
 def _idempotency_headers() -> dict[str, str]:

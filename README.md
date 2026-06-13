@@ -118,7 +118,7 @@ The repo keeps two Python environments due to the `attrs` version conflict (`.ve
 
 - **Pylance** spins up a separate instance per root, so CDK code resolves `aws_cdk` against `.venv` and Lambda code resolves `aws_lambda_powertools` against `.venv-lambda` simultaneously — no red squiggles on either side.
 - **Terminals** opened from each root auto-activate that root's venv.
-- **Test Explorer** runs unit tests under `.venv-lambda` and CDK tests under `.venv` independently.
+- **Test Explorer** runs unit tests under `.venv-lambda` and CDK tests under `.venv` independently. Discovery also works from the plain root folder: every test module guards its venv-specific imports (`pytest.importorskip` for `boto3`/Powertools/`aws_cdk`, plus the lazy handler fixture), so collection under either interpreter lists the other side's suites as *skipped* instead of failing with `Missing Module: boto3`-style discovery errors. Tests are also exempted from mypy via a `tests.*` override in `pyproject.toml`, keeping editor diagnostics in agreement with the CLI gates (which never type-check tests).
 
 **Fallback: open the folder directly.** `File > Open Folder` defaults to `.venv` (CDK side fine, but Powertools imports in `lambda/` show as unresolved due to Pylance's single-interpreter-per-workspace limit). Use only if you specifically don't want the workspace file loaded.
 
