@@ -77,11 +77,29 @@ def lambda_app_module():
     collect tests that don't depend on this fixture without an ImportError
     at conftest load time. Cached in sys.modules under "lambda_app" so that
     mocker.patch.object() sees a consistent module identity across fixtures.
+
+    The handler imports boto3 and Powertools, which live only in
+    ``.venv-lambda``. When this fixture runs under ``.venv`` (the CDK-side
+    interpreter the root-folder Testing panel uses — including "Run with
+    Coverage"), skip rather than error, matching the integration and schema
+    suites' module-level ``importorskip`` guards. Collection already stays
+    clean here because the import is lazy; this makes the *run* clean too.
     """
+    pytest.importorskip("boto3", reason="boto3 not installed — unit tests run in .venv-lambda")
+    pytest.importorskip("aws_lambda_powertools", reason="Powertools not installed — unit tests run in .venv-lambda")
     if "lambda_app" in sys.modules:
         return sys.modules["lambda_app"]
     spec = importlib.util.spec_from_file_location("lambda_app", LAMBDA_APP_PATH)
     module = importlib.util.module_from_spec(spec)
     sys.modules["lambda_app"] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        # Never leave a half-initialized module cached. Without this, a failed
+        # exec (e.g. a missing runtime dep) leaves the broken module in
+        # sys.modules, and every later test that uses this fixture hits the
+        # cache and fails with a confusing AttributeError (no 'ssm_provider')
+        # instead of the real import error.
+        del sys.modules["lambda_app"]
+        raise
     return module
