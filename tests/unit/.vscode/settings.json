@@ -2,7 +2,7 @@
     "python.defaultInterpreterPath": "${workspaceFolder}/../../.venv-lambda/bin/python",
     "python.analysis.extraPaths": ["${workspaceFolder}/../../lambda"],
 
-    "python.testing.pytestArgs": ["."],
+    "python.testing.pytestArgs": [".", "--override-ini=addopts="],
     "python.testing.unittestEnabled": false,
     "python.testing.pytestEnabled": true,
 

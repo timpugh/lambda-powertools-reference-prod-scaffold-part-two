@@ -232,6 +232,12 @@ timeout = 30           # fail any test that runs longer than 30 seconds (pytest-
 # so `make test-cdk` / `make test-integration` (and the CI cdk-check job) pass
 # --override-ini="addopts=" to drop these flags. Running `pytest tests/cdk` directly
 # WITHOUT that override will fail the coverage gate — use the make targets.
+# The VS Code Testing panel passes the same override (python.testing.pytestArgs in
+# .vscode/settings.json and tests/unit/.vscode/settings.json): test DISCOVERY is a
+# collect-only run that executes nothing, so without the override it reports
+# "coverage 0% / FAIL" noise and rewrites report.html+htmlcov on every refresh.
+# The 100% gate is enforced where the full unit suite actually runs: `make test`
+# and the CI test job.
 addopts = [
     "-ra",                       # print a short summary of all non-passed tests at the end
     "--cov=lambda",              # measure coverage for the lambda/ source directory
