@@ -323,11 +323,12 @@ Resources are split across five stacks. By default every resource has `RemovalPo
 | S3 Bucket (access logs) | Receives S3 server access logs (`s3-access-logs/`), CloudFront standard access logs (`cloudfront/`), and Athena query results (`athena-results/`). SSE-S3 — log delivery requires it. 7-day expiration lifecycle rule applied to all prefixes |
 | CloudFront Distribution | HTTPS-only, TLS 1.2+, WAF-protected, custom security-headers policy (HSTS + CSP), access logging to S3 |
 | CloudWatch Log Group (auto-delete) | Auto-delete Lambda log group, KMS-encrypted |
-| Glue Database | Catalog database for CloudFront and S3 access log analytics |
+| Glue Database | Catalog database for CloudFront, S3 access, and WAF log analytics |
 | Glue Table (`cloudfront_logs`) | 33-field tab-delimited schema for CloudFront standard access logs |
 | Glue Table (`s3_access_logs`) | 26-field regex-parsed schema for S3 server access logs |
+| Glue Tables (`waf_cloudfront_logs`, `waf_regional_logs`) | JSON schema (AWS WAF log format) over the `aws-waf-logs-*` buckets, **partition-projected** on `log_time` (no crawler / `ALTER TABLE ADD PARTITION`) |
 | Athena WorkGroup | Query execution config with SSE-KMS encrypted results (per-object override on the SSE-S3 bucket), CloudWatch metrics enabled |
-| Athena Named Queries (5 CloudFront + 6 S3) | Pre-built SQL queries: top URIs, errors, top IPs, bandwidth by edge, cache hit ratio, top operations, error requests, top requesters, slow requests, access denied (403), object read audit |
+| Athena Named Queries (5 CloudFront + 6 S3 + 8 WAF) | Pre-built SQL: top URIs, errors, top IPs, bandwidth, cache hit ratio, top operations, requesters, slow requests, access denied, object read audit, and per-WebACL WAF recent-blocked / top-blocked-IPs / top-rules / by-country |
 | CloudWatch RUM AppMonitor | Real User Monitoring for the browser — page loads, JS errors, Core Web Vitals, fetch timings, user interactions, with X-Ray correlation |
 | Cognito Identity Pool | Unauthenticated identity pool issuing guest credentials to the browser RUM client |
 | IAM Role (RUM guest) | Assumed by the identity pool; scoped to `rum:PutRumEvents` on this app monitor only |
@@ -511,7 +512,7 @@ Every layer of the stack emits structured logs and/or traces:
 | **API Gateway (execution)** | CloudWatch Logs | AWS-managed format — request/response payloads, integration latency, errors | Same as above |
 | **CloudFront** | S3 (`cloudfront/` prefix) | AWS fixed 33-field tab-delimited format — client IP, URI, status, edge location, etc. | N/A (traces propagate from API Gateway → Lambda) |
 | **S3** | S3 (`s3-access-logs/` prefix) | AWS fixed 26-field space-delimited format — requester, operation, key, status, bytes | N/A |
-| **WAF** | S3 (`aws-waf-logs-*`, SSE-S3) | AWS JSON — action, rule matched, request headers, country, URI | Athena (query the S3 bucket) |
+| **WAF** | S3 (`aws-waf-logs-*`, SSE-S3) | AWS JSON — action, rule matched, request headers, country, URI | Athena (`waf_cloudfront_logs` / `waf_regional_logs` Glue tables + named queries) |
 | **Browser (RUM)** | CloudWatch RUM + CloudWatch Logs | AWS JSON — page loads, JS errors, Core Web Vitals, fetch timings, user interactions, session/user IDs | Client-side segment joins the backend trace via `X-Amzn-Trace-Id` |
 
 X-Ray traces flow end-to-end: the browser RUM client emits a client-side segment and attaches an `X-Amzn-Trace-Id` header to outbound fetches, API Gateway continues that trace, Lambda adds subsegments (via Powertools Tracer `@tracer.capture_method`), and the `xrayTraceId` is included in API Gateway access logs for correlation. S3 and CloudFront access logs use AWS-fixed formats that are not customizable.
@@ -875,7 +876,7 @@ aws logs tail /aws/lambda/HelloWorld-us-east-1-AppHelloWorldFunction... --follow
 
 The Lambda's `logging_format=JSON` config makes every line valid JSON, which `--filter-pattern` queries against directly using [CloudWatch metric-filter syntax](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/FilterAndPatternSyntax.html). Pair with [Powertools' `correlation_id` injection](https://docs.powertools.aws.dev/lambda/python/latest/core/logger/#setting-a-correlation-id) to follow a single request end-to-end across all the structured log entries it produced.
 
-For richer ad-hoc queries (joins across log groups, percentile aggregations, time-series visualizations), use [CloudWatch Logs Insights](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/AnalyzingLogData.html) in the AWS Console — the backend stack pre-creates Logs Insights saved queries over the Lambda/API log groups as a model for how to wire those into CDK. (WAF logs now go to S3, not CloudWatch, so they're queried via Athena instead — a WAF Glue/Athena table is a documented follow-up in TODO.md.)
+For richer ad-hoc queries (joins across log groups, percentile aggregations, time-series visualizations), use [CloudWatch Logs Insights](https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/AnalyzingLogData.html) in the AWS Console — the backend stack pre-creates Logs Insights saved queries over the Lambda/API log groups as a model for how to wire those into CDK. WAF logs go to S3 (not CloudWatch), so they're queried via **Athena**: the frontend stack defines two partition-projected Glue tables (`waf_cloudfront_logs`, `waf_regional_logs`) over the `aws-waf-logs-*` buckets plus eight WAF named queries (recent blocked, top blocked IPs, top terminating rules, by country — per WebACL), alongside the CloudFront/S3 access-log tables.
 
 ### Commit message convention
 

@@ -82,6 +82,10 @@ class HelloWorldWafStack(Stack):
         web_acl = wafv2.CfnWebACL(
             self,
             "WebACL",
+            # Explicit name so the WAF→S3 log path (…/WAFLogs/cloudfront/{name}/) is
+            # deterministic — the frontend's Athena Glue table points at it. WAF
+            # log delivery uses the WebACL *name* in the S3 key prefix.
+            name=f"{self.stack_name}-cf",
             scope="CLOUDFRONT",
             default_action=wafv2.CfnWebACL.DefaultActionProperty(allow={}),
             visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(

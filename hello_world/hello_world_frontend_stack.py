@@ -57,6 +57,116 @@ from hello_world.nag_utils import (
     suppress_cdk_singletons,
 )
 
+# AWS WAF S3 log schema for the Athena Glue table — the column set + types AWS
+# documents at athena/.../create-waf-table-partition-projection.html. WAF logs
+# are one JSON object per line; the openx JSON SerDe maps the camelCase keys to
+# these lowercase columns case-insensitively. Nested fields are declared with
+# Hive struct<>/array<> type strings. (name, hive_type) pairs.
+_WAF_LOG_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("timestamp", "bigint"),
+    ("formatversion", "int"),
+    ("webaclid", "string"),
+    ("terminatingruleid", "string"),
+    ("terminatingruletype", "string"),
+    ("action", "string"),
+    (
+        "terminatingrulematchdetails",
+        "array<struct<conditiontype:string,sensitivitylevel:string,location:string,matcheddata:array<string>>>",
+    ),
+    ("httpsourcename", "string"),
+    ("httpsourceid", "string"),
+    (
+        "rulegrouplist",
+        "array<struct<rulegroupid:string,terminatingrule:struct<ruleid:string,action:string,"
+        "rulematchdetails:array<struct<conditiontype:string,sensitivitylevel:string,location:string,"
+        "matcheddata:array<string>>>>,nonterminatingmatchingrules:array<struct<ruleid:string,action:string,"
+        "overriddenaction:string,rulematchdetails:array<struct<conditiontype:string,sensitivitylevel:string,"
+        "location:string,matcheddata:array<string>>>,challengeresponse:struct<responsecode:string,"
+        "solvetimestamp:string>,captcharesponse:struct<responsecode:string,solvetimestamp:string>>>,"
+        "excludedrules:string>>",
+    ),
+    ("ratebasedrulelist", "array<struct<ratebasedruleid:string,limitkey:string,maxrateallowed:int>>"),
+    (
+        "nonterminatingmatchingrules",
+        "array<struct<ruleid:string,action:string,rulematchdetails:array<struct<conditiontype:string,"
+        "sensitivitylevel:string,location:string,matcheddata:array<string>>>,challengeresponse:struct<"
+        "responsecode:string,solvetimestamp:string>,captcharesponse:struct<responsecode:string,"
+        "solvetimestamp:string>>>",
+    ),
+    ("requestheadersinserted", "array<struct<name:string,value:string>>"),
+    ("responsecodesent", "string"),
+    (
+        "httprequest",
+        "struct<clientip:string,country:string,headers:array<struct<name:string,value:string>>,uri:string,"
+        "args:string,httpversion:string,httpmethod:string,requestid:string,fragment:string,scheme:string,"
+        "host:string>",
+    ),
+    ("labels", "array<struct<name:string>>"),
+    ("captcharesponse", "struct<responsecode:string,solvetimestamp:string,failurereason:string>"),
+    ("challengeresponse", "struct<responsecode:string,solvetimestamp:string,failurereason:string>"),
+    ("ja3fingerprint", "string"),
+    ("ja4fingerprint", "string"),
+    ("oversizefields", "string"),
+    ("requestbodysize", "int"),
+    ("requestbodysizeinspectedbywaf", "int"),
+)
+
+# WAF threat-triage Athena named queries, shared by both WAF tables. Static SQL
+# templates (no f-string) with a __WAF_TABLE__ sentinel substituted per table via
+# str.replace — the table names are hardcoded literals, so there's no injection
+# surface; the static-template form also keeps the SQL-construction linter quiet.
+# Each tuple: (construct-id suffix, display-name suffix, description, SQL template).
+_WAF_NAMED_QUERIES: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "RecentBlocked",
+        "Recent Blocked Requests",
+        "Most recent BLOCK actions with client IP, country, URI, and terminating rule",
+        """\
+SELECT from_unixtime(timestamp / 1000) AS request_time,
+       httprequest.clientip, httprequest.country, httprequest.uri,
+       terminatingruleid
+FROM __WAF_TABLE__
+WHERE action = 'BLOCK'
+ORDER BY timestamp DESC
+LIMIT 50""",
+    ),
+    (
+        "TopBlockedIps",
+        "Top Blocked Client IPs",
+        "Client IPs with the most BLOCK actions",
+        """\
+SELECT httprequest.clientip, httprequest.country, COUNT(*) AS block_count
+FROM __WAF_TABLE__
+WHERE action = 'BLOCK'
+GROUP BY httprequest.clientip, httprequest.country
+ORDER BY block_count DESC
+LIMIT 25""",
+    ),
+    (
+        "TopRules",
+        "Top Terminating Rules",
+        "Which rules terminated the most requests",
+        """\
+SELECT terminatingruleid, action, COUNT(*) AS hit_count
+FROM __WAF_TABLE__
+GROUP BY terminatingruleid, action
+ORDER BY hit_count DESC
+LIMIT 25""",
+    ),
+    (
+        "ByCountry",
+        "Blocked by Country",
+        "BLOCK actions grouped by client country",
+        """\
+SELECT httprequest.country, COUNT(*) AS block_count
+FROM __WAF_TABLE__
+WHERE action = 'BLOCK'
+GROUP BY httprequest.country
+ORDER BY block_count DESC
+LIMIT 25""",
+    ),
+)
+
 
 class HelloWorldFrontendStack(Stack):
     """CDK stack for the Hello World frontend.
@@ -79,6 +189,8 @@ class HelloWorldFrontendStack(Stack):
         api_url: str,
         api_id: str,
         waf_acl_arn: str,
+        cf_waf_logs_location: str,
+        regional_waf_logs_location: str,
         **kwargs: Any,
     ) -> None:
         """Provision all frontend AWS resources.
@@ -90,10 +202,16 @@ class HelloWorldFrontendStack(Stack):
             api_id: The backend API Gateway REST API ID, used to pin the CSP connect-src
                 to the exact execute-api host instead of a region-wide wildcard.
             waf_acl_arn: ARN of the WAF WebACL from HelloWorldWafStack (always in us-east-1).
+            cf_waf_logs_location: ``s3://…/`` prefix of the CloudFront WebACL's WAF logs,
+                for the Athena Glue table (computed by the Stage — see its docstring).
+            regional_waf_logs_location: ``s3://…/`` prefix of the regional (API Gateway)
+                WebACL's WAF logs, for the Athena Glue table.
             **kwargs: Additional keyword arguments passed to the parent Stack.
         """
         super().__init__(scope, construct_id, **kwargs)
         self._api_id = api_id
+        self._cf_waf_logs_location = cf_waf_logs_location
+        self._regional_waf_logs_location = regional_waf_logs_location
 
         apply_compliance_aspects(self)
 
@@ -1198,11 +1316,48 @@ LIMIT 100""",
         )
         nq_s3_object_reads.add_dependency(workgroup)
 
+        # ── WAF logs (CloudFront + regional WebACLs) ─────────────────────────
+        # WAF delivers to S3 (see create_waf_logs_bucket); these Glue tables use
+        # partition projection over WAF's date-partitioned log layout so Athena
+        # needs no ALTER TABLE ADD PARTITION as new logs arrive. The CloudFront
+        # WAF logs live in us-east-1; when the deployment region differs, Athena
+        # queries that table cross-region (a no-op in the default us-east-1 deploy).
+        self._create_waf_glue_table(
+            table_id="WafCloudFrontLogsTable",
+            table_name="waf_cloudfront_logs",
+            db_name=db_name,
+            location=self._cf_waf_logs_location,
+            glue_db=glue_db,
+        )
+        self._create_waf_glue_table(
+            table_id="WafRegionalLogsTable",
+            table_name="waf_regional_logs",
+            db_name=db_name,
+            location=self._regional_waf_logs_location,
+            glue_db=glue_db,
+        )
+        self._create_waf_named_queries(
+            db_name=db_name,
+            workgroup_name=workgroup_name,
+            workgroup=workgroup,
+            table_name="waf_cloudfront_logs",
+            id_prefix="WafCf",
+            display_prefix="WAF CloudFront",
+        )
+        self._create_waf_named_queries(
+            db_name=db_name,
+            workgroup_name=workgroup_name,
+            workgroup=workgroup,
+            table_name="waf_regional_logs",
+            id_prefix="WafApi",
+            display_prefix="WAF Regional",
+        )
+
         # ── Outputs ──────────────────────────────────────────────────────
         CfnOutput(
             self,
             "GlueDatabaseName",
-            description="Glue catalog database for CloudFront and S3 access log analytics",
+            description="Glue catalog database for CloudFront, S3 access, and WAF log analytics",
             value=db_name,
         )
         CfnOutput(
@@ -1211,3 +1366,90 @@ LIMIT 100""",
             description="Athena workgroup for querying access logs",
             value=workgroup_name,
         )
+
+    def _create_waf_glue_table(
+        self,
+        *,
+        table_id: str,
+        table_name: str,
+        db_name: str,
+        location: str,
+        glue_db: glue.CfnDatabase,
+    ) -> None:
+        """Create a partition-projected Glue table over a WAF S3 log location.
+
+        ``location`` is the ``s3://…/{web-acl-name}/`` prefix (computed by the
+        Stage). Partition projection on a single ``log_time`` partition keyed to
+        WAF's ``yyyy/MM/dd/HH/mm`` path means Athena resolves partitions in-memory
+        — no crawler, no ``ALTER TABLE ADD PARTITION``. Schema + projection config
+        follow AWS's documented WAF Athena DDL; the openx JSON SerDe maps WAF's
+        camelCase keys to the lowercase columns case-insensitively.
+        """
+        table = glue.CfnTable(
+            self,
+            table_id,
+            catalog_id=self.account,
+            database_name=db_name,
+            table_input=glue.CfnTable.TableInputProperty(
+                name=table_name,
+                description="AWS WAF access logs (partition-projected)",
+                table_type="EXTERNAL_TABLE",
+                partition_keys=[glue.CfnTable.ColumnProperty(name="log_time", type="string")],
+                parameters={
+                    "EXTERNAL": "TRUE",
+                    "projection.enabled": "true",
+                    "projection.log_time.type": "date",
+                    "projection.log_time.format": "yyyy/MM/dd/HH/mm",
+                    "projection.log_time.interval": "1",
+                    "projection.log_time.interval.unit": "minutes",
+                    "projection.log_time.range": "2025/01/01/00/00,NOW",
+                    "storage.location.template": f"{location}${{log_time}}",
+                },
+                storage_descriptor=glue.CfnTable.StorageDescriptorProperty(
+                    location=location,
+                    input_format="org.apache.hadoop.mapred.TextInputFormat",
+                    output_format="org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+                    serde_info=glue.CfnTable.SerdeInfoProperty(
+                        serialization_library="org.openx.data.jsonserde.JsonSerDe",
+                    ),
+                    columns=[
+                        glue.CfnTable.ColumnProperty(name=name, type=hive_type) for name, hive_type in _WAF_LOG_COLUMNS
+                    ],
+                ),
+            ),
+        )
+        table.add_dependency(glue_db)
+
+    def _create_waf_named_queries(
+        self,
+        *,
+        db_name: str,
+        workgroup_name: str,
+        workgroup: athena.CfnWorkGroup,
+        table_name: str,
+        id_prefix: str,
+        display_prefix: str,
+    ) -> None:
+        """Create the standard WAF threat-triage Athena named queries for one WAF table.
+
+        Mirrors (and extends) the CloudWatch Logs Insights saved queries the WAF→S3
+        move retired: blocked requests, top blocked client IPs, top terminating
+        rules, and a country breakdown. Parameterized by table so the CloudFront and
+        regional WAF tables share one definition.
+
+        The SQL templates are static module constants with a ``__WAF_TABLE__``
+        sentinel filled in by ``str.replace`` (not an f-string) — the table names
+        are hardcoded literals, but a static template + replace keeps it free of
+        the SQL-construction lint heuristic and obviously injection-free.
+        """
+        for suffix, name_suffix, description, query_template in _WAF_NAMED_QUERIES:
+            nq = athena.CfnNamedQuery(
+                self,
+                f"{id_prefix}{suffix}",
+                database=db_name,
+                work_group=workgroup_name,
+                name=f"{display_prefix} - {name_suffix}",
+                description=description,
+                query_string=query_template.replace("__WAF_TABLE__", table_name),
+            )
+            nq.add_dependency(workgroup)

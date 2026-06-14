@@ -512,6 +512,20 @@ def create_sse_s3_log_bucket(
     return bucket
 
 
+def waf_logs_bucket_name(*, account: str, stack_name: str, suffix: str) -> str:
+    """Deterministic name for a WAF log bucket: ``aws-waf-logs-{account}-{hash}-{suffix}``.
+
+    AWS forces the ``aws-waf-logs-`` prefix, so the name is pinned. Account-qualified
+    for S3's global uniqueness; a short hash of the stack name (which already encodes
+    env + region) keeps it collision-free and well under the 63-char limit. Shared by
+    ``create_waf_logs_bucket`` (the producer) and the Stage (which computes the WAF
+    log S3 path for the Athena Glue tables without a cross-stack reference) so the
+    name formula lives in exactly one place.
+    """
+    name_hash = hashlib.sha256(stack_name.encode()).hexdigest()[:12]
+    return f"aws-waf-logs-{account}-{name_hash}-{suffix}"
+
+
 def create_waf_logs_bucket(scope: Construct, suffix: str) -> s3.Bucket:
     """Create an ``aws-waf-logs-*`` S3 bucket wired for AWS WAF log delivery.
 
@@ -548,10 +562,6 @@ def create_waf_logs_bucket(scope: Construct, suffix: str) -> s3.Bucket:
         The created bucket (point WAF logging at ``bucket.bucket_arn``).
     """
     stack = Stack.of(scope)
-    # Hash the stack name (which already encodes env + region) into a fixed-width
-    # token so the pinned name stays well under S3's 63-char limit regardless of
-    # how long an ephemeral env name is.
-    name_hash = hashlib.sha256(stack.stack_name.encode()).hexdigest()[:12]
     waf_bucket_reason = (
         "WAF log destination bucket — SSE-S3 (delivery doesn't support KMS-CMK buckets), "
         "no self-logging/versioning/replication for an append-only log sink"
@@ -563,7 +573,7 @@ def create_waf_logs_bucket(scope: Construct, suffix: str) -> s3.Bucket:
         expiration_days=90,
         removal_policy=RemovalPolicy.DESTROY,
         auto_delete=True,
-        bucket_name=f"aws-waf-logs-{stack.account}-{name_hash}-{suffix}",
+        bucket_name=waf_logs_bucket_name(account=stack.account, stack_name=stack.stack_name, suffix=suffix),
         # WAF delivers objects with a bucket-owner-full-control ACL, so ACLs must
         # be enabled (the bucket-owner-enforced default would reject them).
         object_ownership=s3.ObjectOwnership.BUCKET_OWNER_PREFERRED,

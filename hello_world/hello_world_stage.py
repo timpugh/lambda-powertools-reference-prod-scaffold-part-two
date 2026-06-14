@@ -47,6 +47,7 @@ from hello_world.hello_world_data_stack import HelloWorldDataStack
 from hello_world.hello_world_frontend_stack import HelloWorldFrontendStack
 from hello_world.hello_world_stack import HelloWorldStack
 from hello_world.hello_world_waf_stack import HelloWorldWafStack
+from hello_world.nag_utils import waf_logs_bucket_name
 
 # The environment every deployment lands in unless overridden via
 # `-c env=<name>` (or the ENVIRONMENT variable — see app.py). "prod" keeps
@@ -193,6 +194,24 @@ class HelloWorldStage(cdk.Stage):
             tags=stack_tags,
         )
 
+        # WAF→S3 log locations for the frontend's Athena Glue tables. Computed
+        # here (the Stage knows every stack name) from the shared
+        # waf_logs_bucket_name formula + the AWS-fixed WAF log key layout
+        # (AWSLogs/{account}/WAFLogs/{cloudfront|region}/{web-acl-name}/) + the
+        # explicit WebACL names set in the WAF/backend stacks. Passing the
+        # resolved strings avoids a cross-stack (and cross-region) reference —
+        # they use only the account pseudo-param, which resolves identically in
+        # every stack of this account.
+        account = cdk.Aws.ACCOUNT_ID
+        cf_waf_logs_location = (
+            f"s3://{waf_logs_bucket_name(account=account, stack_name=waf_stack_name, suffix='cf')}"
+            f"/AWSLogs/{account}/WAFLogs/cloudfront/{waf_stack_name}-cf/"
+        )
+        regional_waf_logs_location = (
+            f"s3://{waf_logs_bucket_name(account=account, stack_name=backend_stack_name, suffix='api')}"
+            f"/AWSLogs/{account}/WAFLogs/{region}/{backend_stack_name}-api/"
+        )
+
         self.frontend = HelloWorldFrontendStack(
             self,
             frontend_stack_name,
@@ -200,6 +219,8 @@ class HelloWorldStage(cdk.Stage):
             api_url=self.backend.api_url,
             api_id=self.backend.api_id,
             waf_acl_arn=self.waf.web_acl_arn,
+            cf_waf_logs_location=cf_waf_logs_location,
+            regional_waf_logs_location=regional_waf_logs_location,
             env=target_env,
             tags=stack_tags,
             # Enables CDK's SSM-based cross-region reference bridging.

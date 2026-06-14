@@ -103,6 +103,8 @@ def frontend_template() -> Template:
         api_url=backend.api_url,
         api_id=backend.api_id,
         waf_acl_arn=waf.web_acl_arn,
+        cf_waf_logs_location="s3://aws-waf-logs-123456789012-deadbeef0001-cf/AWSLogs/123456789012/WAFLogs/cloudfront/test-cf/",
+        regional_waf_logs_location="s3://aws-waf-logs-123456789012-deadbeef0002-api/AWSLogs/123456789012/WAFLogs/us-east-1/test-api/",
         env=_TEST_ENV,
         cross_region_references=True,
     )
@@ -124,6 +126,8 @@ def _build_frontend(app: cdk.App, stack_suffix: str) -> HelloWorldFrontendStack:
         api_url=backend.api_url,
         api_id=backend.api_id,
         waf_acl_arn=waf.web_acl_arn,
+        cf_waf_logs_location="s3://aws-waf-logs-123456789012-deadbeef0001-cf/AWSLogs/123456789012/WAFLogs/cloudfront/test-cf/",
+        regional_waf_logs_location="s3://aws-waf-logs-123456789012-deadbeef0002-api/AWSLogs/123456789012/WAFLogs/us-east-1/test-api/",
         env=_TEST_ENV,
         cross_region_references=True,
     )
@@ -1024,6 +1028,30 @@ class TestFrontendStack:
         frontend_template.has_output("CloudFrontDomainName", {})
         frontend_template.has_output("CloudFrontDistributionId", {})
         frontend_template.has_output("FrontendBucketName", {})
+
+    def test_waf_glue_tables_use_partition_projection(self, frontend_template: Template) -> None:
+        # Two WAF Glue tables (CloudFront + regional) over the aws-waf-logs-* S3
+        # data, each partition-projected on log_time so Athena needs no crawler /
+        # ALTER TABLE ADD PARTITION. JSON SerDe maps WAF's records to the columns.
+        tables = frontend_template.find_resources("AWS::Glue::Table")
+        waf_tables = {
+            lid: t for lid, t in tables.items() if str(t["Properties"]["TableInput"].get("Name", "")).startswith("waf_")
+        }
+        assert len(waf_tables) == 2, "expected waf_cloudfront_logs + waf_regional_logs Glue tables"
+        for table in waf_tables.values():
+            ti = table["Properties"]["TableInput"]
+            assert ti["Parameters"]["projection.enabled"] == "true"
+            assert ti["Parameters"]["projection.log_time.type"] == "date"
+            assert "storage.location.template" in ti["Parameters"]
+            assert ti["PartitionKeys"] == [{"Name": "log_time", "Type": "string"}]
+            assert ti["StorageDescriptor"]["SerdeInfo"]["SerializationLibrary"] == "org.openx.data.jsonserde.JsonSerDe"
+
+    def test_waf_athena_named_queries_exist(self, frontend_template: Template) -> None:
+        # 4 threat-triage queries per WAF table (8 total) restore the analysis the
+        # retired CloudWatch Logs Insights saved queries provided.
+        named_queries = frontend_template.find_resources("AWS::Athena::NamedQuery")
+        waf_queries = [q for q in named_queries.values() if str(q["Properties"].get("Name", "")).startswith("WAF ")]
+        assert len(waf_queries) == 8, f"expected 8 WAF named queries, found {len(waf_queries)}"
 
 
 class TestAuditStack:

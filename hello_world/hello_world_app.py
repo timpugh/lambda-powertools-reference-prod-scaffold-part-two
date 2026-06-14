@@ -836,6 +836,9 @@ class HelloWorldApp(Construct):
         regional_acl = wafv2.CfnWebACL(
             self,
             "ApiRegionalWebACL",
+            # Explicit name so the WAF→S3 log path (…/WAFLogs/{region}/{name}/) is
+            # deterministic for the frontend's Athena Glue table.
+            name=f"{stack.stack_name}-api",
             scope="REGIONAL",
             default_action=wafv2.CfnWebACL.DefaultActionProperty(allow={}),
             visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
