@@ -117,6 +117,39 @@ class TestRetainDataPlumbing:
         Template.from_stack(stage.data).has_resource("AWS::DynamoDB::GlobalTable", {"DeletionPolicy": "Retain"})
 
 
+class TestDeploymentAggressivenessByEnv:
+    """Deployment aggressiveness is environment-gated: gradual in prod, fast in dev.
+
+    Prod-shape detail is asserted in test_stacks.py; these tests prove the
+    *contrast* — the dev/ephemeral shape uses all-at-once so iterating doesn't
+    wait out a canary window or a flag bake.
+    """
+
+    def test_dev_codedeploy_is_all_at_once(self, dev_stage: HelloWorldStage) -> None:
+        template = Template.from_stack(dev_stage.backend)
+        groups = template.find_resources("AWS::CodeDeploy::DeploymentGroup")
+        assert groups, "expected a CodeDeploy deployment group even in dev"
+        config_names = [g["Properties"].get("DeploymentConfigName", "") for g in groups.values()]
+        assert all("AllAtOnce" in name for name in config_names), config_names
+
+    def test_dev_appconfig_strategy_is_all_at_once(self, dev_stage: HelloWorldStage) -> None:
+        template = Template.from_stack(dev_stage.backend)
+        template.has_resource_properties(
+            "AWS::AppConfig::DeploymentStrategy",
+            {"GrowthFactor": 100, "DeploymentDurationInMinutes": 0, "FinalBakeTimeInMinutes": 0},
+        )
+
+    def test_dev_still_wires_the_appconfig_rollback_monitor(self, dev_stage: HelloWorldStage) -> None:
+        # The rollback machinery is present in both shapes — only rollout speed
+        # differs. The monitor is inert under all-at-once (no bake window) but
+        # wired, so dev and prod stay structurally identical.
+        template = Template.from_stack(dev_stage.backend)
+        template.has_resource_properties(
+            "AWS::AppConfig::Environment",
+            {"Monitors": Match.array_with([Match.object_like({"AlarmArn": Match.any_value()})])},
+        )
+
+
 class TestNagCompliance:
     """Zero error-level annotations per stack, asserted without Docker.
 

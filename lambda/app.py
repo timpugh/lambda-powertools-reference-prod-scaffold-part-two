@@ -300,6 +300,14 @@ def hello() -> HelloResponse:
         # transient network blip, and the cause is unrecoverable after the
         # fact. Kept at WARNING because the request still succeeds.
         logger.warning("Feature flag evaluation failed, falling back to default", exc_info=True)
+        # Emit a metric on the fallback so a bad flag *config* is observable.
+        # A bad config is caught here and degraded gracefully (the request still
+        # returns 200), so it produces no Lambda error or 5xx — this metric is
+        # the only signal that the config is broken. The AppConfig deployment
+        # monitor (see HelloWorldApp._attach_appconfig_rollback_monitor) alarms
+        # on it to auto-roll-back a bad flag rollout. Lands in the HelloWorld
+        # namespace with the service dimension Powertools adds automatically.
+        metrics.add_metric(name="FeatureFlagEvaluationFailure", unit=MetricUnit.Count, value=1)
         enhanced = False
 
     if enhanced:

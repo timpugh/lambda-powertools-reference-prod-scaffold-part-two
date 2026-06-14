@@ -39,7 +39,7 @@ This application provisions Lambda, API Gateway, DynamoDB, SSM Parameter Store, 
 ## Table of contents
 
 - [Getting started](#getting-started) — [Prerequisites](#prerequisites) · [Quick start](#quick-start) · [Makefile](#makefile) · [Editor setup (VS Code)](#editor-setup-vs-code)
-- [Architecture](#architecture) — [Lambda Powertools features](#lambda-powertools-features) · [AWS resources provisioned](#aws-resources-provisioned) · [Stack and construct composition](#stack-and-construct-composition) · [Stateful data stack and `retain_data`](#stateful-data-stack-and-retain_data) · [Frontend stack](#frontend-stack) · [Monitoring](#monitoring)
+- [Architecture](#architecture) — [Lambda Powertools features](#lambda-powertools-features) · [AWS resources provisioned](#aws-resources-provisioned) · [Stack and construct composition](#stack-and-construct-composition) · [Stateful data stack and `retain_data`](#stateful-data-stack-and-retain_data) · [Deployment safety](#deployment-safety-canary-lambda--appconfig-rollback) · [Frontend stack](#frontend-stack) · [Monitoring](#monitoring)
 - [Deploy the application](#deploy-the-application) — [Recommended order](#recommended-order-for-ongoing-deploys) · [Ephemeral environment](#deploying-an-ephemeral-environment) · [Different region](#deploying-to-a-different-region) · [Destroying](#destroying-a-deployment) · [Cleanup](#cleanup)
 - [Working in the codebase](#working-in-the-codebase) — [Add a resource](#add-a-resource-to-your-application) · [Useful CDK commands](#useful-cdk-commands) · [Synthesize and validate locally](#synthesize-and-validate-locally) · [Debugging the Lambda function](#debugging-the-lambda-function) · [Fetch, tail, and filter logs](#fetch-tail-and-filter-lambda-function-logs) · [Commit message convention](#commit-message-convention) · [Cutting a release](#cutting-a-release) · [Documentation](#documentation)
 - [Quality and security](#quality-and-security) — [Tests](#tests) · [Linting and static analysis](#linting-and-static-analysis) · [Detecting deprecated APIs](#detecting-deprecated-apis) · [Pre-commit hooks](#pre-commit-hooks) · [Security](#security) · [CDK security checks](#cdk-security-checks) · [pyproject.toml configuration](#pyprojecttoml-configuration)
@@ -218,7 +218,7 @@ X-Ray tracing with `@tracer.capture_lambda_handler` on the entry point and `@tra
 
 #### Metrics
 
-CloudWatch Embedded Metric Format (EMF) via `@metrics.log_metrics(capture_cold_start_metric=True)`. The `/hello` route emits a `HelloRequests` count metric. Metrics are published under the `HelloWorld` namespace (set via `POWERTOOLS_METRICS_NAMESPACE`).
+CloudWatch Embedded Metric Format (EMF) via `@metrics.log_metrics(capture_cold_start_metric=True)`. The `/hello` route emits a `HelloRequests` count metric, and a `FeatureFlagEvaluationFailure` count metric on the feature-flag fallback path (a bad flag config is caught and degraded gracefully, so this metric is what makes a broken config observable — the AppConfig deployment monitor alarms on it to auto-roll-back a bad flag rollout, see [Deployment safety](#deployment-safety-canary-lambda--appconfig-rollback)). Metrics are published under the `HelloWorld` namespace (set via `POWERTOOLS_METRICS_NAMESPACE`).
 
 #### Event Handler
 
@@ -292,19 +292,23 @@ Resources are split across four stacks. By default every resource has `RemovalPo
 |---|---|
 | KMS Key | Encrypts the compute-side resources: log groups, Lambda env vars, AppConfig hosted config, and the SNS alarm topic (the DynamoDB table has its own CMK in `HelloWorldData-{region}`) |
 | Lambda Function | Runs the hello-world handler (Python 3.14, 256 MB, arm64/Graviton, X-Ray tracing, JSON logging, env vars CMK-encrypted, async retries pinned to 0) |
+| Lambda Alias (`live`) + Version | Traffic-shifting target for CodeDeploy — the API integrates with the alias so deployments can canary + roll back (see [Deployment safety](#deployment-safety-canary-lambda--appconfig-rollback)) |
+| CodeDeploy Application + Deployment Group | Shifts the alias onto each new version (canary 10%/5min in prod, all-at-once in dev) with automatic rollback on the canary error alarm |
 | CloudWatch Log Group | Lambda log group with 1-week retention, KMS-encrypted |
-| API Gateway REST API | Exposes `GET /hello` with X-Ray tracing and per-stage throttling (rate 100 / burst 200) |
+| API Gateway REST API | Exposes `GET /hello` (integrated with the Lambda `live` alias) with X-Ray tracing and per-stage throttling (rate 100 / burst 200) |
 | CloudWatch Log Group (access) | API Gateway access logs (17-field JSON), KMS-encrypted |
 | CloudWatch Log Group (execution) | API Gateway execution logs, KMS-encrypted |
 | WAF WebACL (regional) | REGIONAL WebACL with the 4 shared managed rule groups, associated with the Prod stage to close the `execute-api` CloudFront-bypass window (`_attach_regional_waf`) |
 | CloudWatch Log Group (`aws-waf-logs-*`) | Receives the regional WAF's access logs, KMS-encrypted |
 | SQS Queue (DLQ) | Captures failed async invocations of the AwsCustomResource provider Lambda (CMK-encrypted, 14-day retention, SSL-enforced) |
 | SNS Topic + CloudWatch Alarms | Lambda p90 latency and API Gateway 5xx fault-rate alarms publish to a CMK-encrypted, SSL-enforced topic (prod environments only — ephemeral envs keep the alarms but skip the topic) |
+| CloudWatch Alarms (deployment-control) | Two alarms consumed by the deployment services, not the SNS topic: a canary alias-errors alarm (CodeDeploy rollback) and a `FeatureFlagEvaluationFailure` alarm (AppConfig rollback) |
 | SSM Parameter | Greeting message (CDK-generated name, read via the `GREETING_PARAM_NAME` env var) |
 | AppConfig Application | Feature flag configuration |
-| AppConfig Environment | `{stack}-env` environment for feature flags |
+| AppConfig Environment | `{stack}-env` environment for feature flags, with a CloudWatch alarm monitor that auto-rolls-back a bad flag deployment |
+| IAM Role (AppConfig monitor) | Lets AppConfig read the rollback alarm state (`cloudwatch:DescribeAlarms`) during a flag deployment |
 | AppConfig Configuration Profile | `{stack}-flags` freeform profile holding the Powertools feature-flags schema (the native `AWS.AppConfig.FeatureFlags` type serves a format Powertools cannot parse — see Design decisions) |
-| AppConfig Deployment Strategy + Deployment | All-at-once strategy (zero bake) deploying the hosted flag configuration to the environment — without a deployment, `GetLatestConfiguration` serves nothing and flags can never evaluate true |
+| AppConfig Deployment Strategy + Deployment | Gradual strategy in prod (LINEAR 25%/step over 10 min, 5-min bake) so the monitor can roll back a bad flag rollout; all-at-once (zero bake) in dev/ephemeral. Without a deployment, `GetLatestConfiguration` serves nothing and flags can never evaluate true |
 | Resource Group + Application Insights | CloudWatch Application Insights monitoring |
 | CloudWatch Dashboard | Lambda, API GW, DynamoDB metrics via cdk-monitoring-constructs |
 | Custom Resource (`AppInsightsDashboardCleanup`) | Deletes the Application Insights auto-created dashboard on destroy |
@@ -367,6 +371,16 @@ npx cdk deploy --all -c retain_data=true     # or make deploy with the same -c f
 The intent is that a production fork "forgets the `RETAIN` flag" at worst — a recoverable mistake — rather than discovering at scale that stateful resources are entangled in a stack they need to redeploy. The table is handed to the backend cross-stack (`idempotency_table=`), which is the single cross-stack relationship: the Lambda gets its `IDEMPOTENCY_TABLE_NAME` env var, a scoped read/write grant, and dashboard monitoring.
 
 **Dedicated CMK.** The table is encrypted by *this* stack's own key, not the compute stack's. Keeping the key with the data it protects is what makes retention meaningful — a retained table whose key lived in a destroyable compute stack would be unreadable once that stack is torn down. It also means keys are never shared across the stack boundary, so each carries a tighter, least-privilege key policy. (PITR is enabled for point-in-time recovery; a `retain_data=true` fork should additionally enroll the table in an AWS Backup plan — see [`TODO.md`](TODO.md). The `DynamoDBInBackupPlan` nag suppressions live on the data stack accordingly.)
+
+### Deployment safety (canary Lambda + AppConfig rollback)
+
+Two independent rollout paths can break production — a bad **code** deploy and a bad **feature-flag config** deploy — so each gets a progressive-delivery mechanism with automatic, alarm-driven rollback. Both are wired in [`hello_world_app.py`](hello_world/hello_world_app.py) and, like the alarm-routing split, their *aggressiveness* is environment-gated: gradual in prod, fast in dev. The machinery (alias, deployment group, monitor, alarms) exists in both shapes — only the rollout speed differs, so dev and prod stay structurally identical.
+
+**Code: CodeDeploy traffic shifting on a Lambda alias.** The function publishes a new version on every change, and the API Gateway integration targets a `live` **alias** rather than `$LATEST` — so what actually moves production traffic is a CodeDeploy deployment, not a raw function update. In prod the alias shifts **canary 10% for 5 minutes, then the remainder** (`CANARY_10PERCENT_5MINUTES`); in dev it shifts all-at-once. A CloudWatch alarm on the alias error count is wired into the deployment group with `DEPLOYMENT_STOP_ON_ALARM` auto-rollback, so a new version that starts erroring during the shift rolls the alias back to the previous version automatically (`_attach_canary_deployment`).
+
+**Config: AppConfig gradual deployment + monitor.** The feature-flag deployment strategy is gradual in prod (`LINEAR`, 25%/step over 10 minutes, with a 5-minute bake) and all-at-once in dev. The AppConfig **environment monitor** watches a CloudWatch alarm during the rollout and bake window and auto-rolls-back the config if it fires (`_attach_appconfig_rollback_monitor`). The monitored signal is deliberately *not* Lambda errors: a bad flag config is caught by the handler's feature-flag fallback and degraded gracefully (the request still returns 200), so it produces no Lambda error or 5xx. The handler instead emits a `FeatureFlagEvaluationFailure` EMF metric on that fallback path, and the monitor alarms on it — the only signal that actually distinguishes a broken config from healthy traffic. (Watching a by-name metric also keeps the wiring acyclic: the AppConfig environment references the alarm, so the alarm must not transitively reference the Lambda — which depends on the environment through its AppConfig IAM grant. A metric addressed by name + static dimensions carries no such CDK dependency, where `self.function.metric_errors()` would have formed a cycle.)
+
+**A note on deploy time.** A gradual rollout means a prod `cdk deploy` that changes Lambda code or flag config *blocks* until the shift (and bake) complete — minutes, not seconds. That wait is the point: it's the window in which an alarm can trigger rollback before a bad change reaches every caller. Dev/ephemeral environments skip it so iteration stays fast.
 
 ### Frontend stack
 
@@ -1169,8 +1183,8 @@ Current suppressions across all stacks:
 | `AwsSolutions-APIG4` | Backend | Stack | No authorizer — auth is out of scope for this sample |
 | `AwsSolutions-COG4` | Backend | Stack | No Cognito authorizer — same as APIG4 |
 | `AwsSolutions-COG7` | Frontend | Resource (`RumIdentityPool`) | RUM requires unauthenticated guest credentials — anonymous visitors have no prior identity |
-| `AwsSolutions-IAM4` | Backend, Frontend | Per-resource (CDK singletons + HelloWorldFunction) | CDK-managed Lambda roles use AWS managed policies; not configurable by the caller |
-| `AwsSolutions-IAM5` | Backend, Frontend, WAF | Per-resource (with `applies_to`) | Wildcard permissions scoped to specific actions — X-Ray, KMS `GenerateDataKey*`/`ReEncrypt*`, CDK custom resource `Resource::*` |
+| `AwsSolutions-IAM4` | Backend, Frontend | Per-resource (CDK singletons + HelloWorldFunction + CodeDeploy deployment group) | CDK-managed roles use AWS managed policies (the CodeDeploy group uses `AWSCodeDeployRoleForLambdaLimited`); not configurable by the caller |
+| `AwsSolutions-IAM5` | Backend, Frontend, WAF | Per-resource (with `applies_to`) | Wildcard permissions scoped to specific actions/resources — X-Ray, KMS `GenerateDataKey*`/`ReEncrypt*`, CDK custom resource `Resource::*`, and the AppConfig monitor role's `cloudwatch:DescribeAlarms` (`Resource::*` — the action has no resource-level scoping) |
 | `AwsSolutions-L1` | Backend, Frontend | Per-resource (CDK singletons) | CDK-managed singleton Lambda runtimes are not configurable. The suppression on `HelloWorldFunction` itself was retired when the runtime moved to Python 3.14, which the pinned cdk-nag recognizes as latest |
 | `AwsSolutions-S1` | Frontend | Resource (log bucket) | The access log bucket itself — logging to itself would be circular |
 | `AwsSolutions-CFR1` | Frontend | Stack | Geo restriction not required for sample app |
@@ -1180,6 +1194,8 @@ Current suppressions across all stacks:
 | `Serverless-LambdaLatestVersion` | Backend, Frontend | Per-resource (CDK singletons) | CDK-managed singleton Lambda runtimes are not configurable. The suppression on `HelloWorldFunction` itself was retired when the runtime moved to Python 3.14 |
 | `Serverless-LambdaAsyncFailureDestination` | Backend | Per-resource (`HelloWorldFunction`) | Invoked synchronously via API Gateway — no async event source exists; the EventInvokeConfig that trips the rule exists only to pin `retry_attempts=0` explicitly |
 | `NIST.800.53.R5-CloudWatchAlarmAction`, `HIPAA.Security-CloudWatchAlarmAction` | Backend | Monitoring subtree, **non-prod environments only** | Ephemeral/dev stacks deliberately have no notification channel (no SNS topic — they must never page anyone); alarms remain as dashboard signals. The prod shape routes every alarm to SNS and needs no suppression |
+| `NIST.800.53.R5-CloudWatchAlarmAction`, `HIPAA.Security-CloudWatchAlarmAction` | Backend | Per-resource (canary + AppConfig rollback alarms, **all environments**) | Deployment-control alarms are polled by CodeDeploy / AppConfig to decide on rollback — they are not a paging channel, so they carry no SNS action by design (distinct from the operational alarms above, which DO route to SNS in prod) |
+| `NIST.800.53.R5-IAMNoInlinePolicy` (+ HIPAA/PCI) | Backend | Per-resource (AppConfig monitor role) | CDK generates the monitor role's `cloudwatch:DescribeAlarms` policy inline — not directly configurable |
 | `Serverless-LambdaTracing` | Backend, Frontend | Per-resource (CDK singletons only) | CDK-managed provider Lambdas do not expose tracing config; `HelloWorldFunction` passes natively |
 | `CdkNagValidationFailure` | Backend | Stack | Intrinsic function reference prevents `Serverless-APIGWStructuredLogging` from validating |
 | `NIST.800.53.R5-LambdaConcurrency` | Backend, Frontend | Per-resource (CDK singletons) | CDK-managed singleton Lambdas — concurrency is not configurable |

@@ -31,6 +31,12 @@ from aws_cdk import (
     aws_applicationinsights as appinsights,
 )
 from aws_cdk import (
+    aws_cloudwatch as cloudwatch,
+)
+from aws_cdk import (
+    aws_codedeploy as codedeploy,
+)
+from aws_cdk import (
     aws_dynamodb as dynamodb,
 )
 from aws_cdk import (
@@ -271,17 +277,31 @@ class HelloWorldApp(Construct):
         # calls) only serves configuration that has been deployed to the
         # environment. Without this Deployment the enhanced_greeting flag could
         # never evaluate true and every fetch would take the handler's
-        # error-fallback path. All-at-once with zero bake suits a sample app —
-        # production forks should consider a gradual strategy with CloudWatch
-        # alarm rollback. CFN re-runs the deployment whenever the hosted
+        # error-fallback path. CFN re-runs the deployment whenever the hosted
         # version changes (ConfigurationVersion references flags_version.ref).
+        #
+        # The deployment strategy is environment-aware, mirroring the
+        # alarm-routing split: production rolls the flag config out *gradually*
+        # (LINEAR, 25%/step over 10 min) with a 5-minute bake so the environment
+        # monitor wired in _attach_appconfig_rollback_monitor can auto-roll-back
+        # a bad config before it reaches every caller. Dev/ephemeral environments
+        # use all-at-once with zero bake so iterating on flags doesn't wait out a
+        # rollout. The rollback machinery (monitor + alarm) is wired in both
+        # shapes — only the rollout speed differs. Note the gradual rollout means
+        # a prod `cdk deploy` that changes flags blocks ~15 min until the
+        # deployment + bake complete; that wait is the point of a safe rollout.
+        if is_production_env:
+            strategy_name, deploy_minutes, growth_factor, bake_minutes = f"{stack.stack_name}-gradual", 10, 25, 5
+        else:
+            strategy_name, deploy_minutes, growth_factor, bake_minutes = f"{stack.stack_name}-all-at-once", 0, 100, 0
         flags_deployment_strategy = appconfig.CfnDeploymentStrategy(
             self,
             "FeatureFlagsDeployStrategy",
-            name=f"{stack.stack_name}-all-at-once",
-            deployment_duration_in_minutes=0,
-            growth_factor=100,
-            final_bake_time_in_minutes=0,
+            name=strategy_name,
+            deployment_duration_in_minutes=deploy_minutes,
+            growth_factor=growth_factor,
+            growth_type="LINEAR",
+            final_bake_time_in_minutes=bake_minutes,
             replicate_to="NONE",
         )
         appconfig.CfnDeployment(
@@ -380,6 +400,21 @@ class HelloWorldApp(Construct):
         if not isinstance(cfn_function, _lambda.CfnFunction):
             raise TypeError(f"Expected HelloWorldFunction default_child to be CfnFunction, got {type(cfn_function)}")
         cfn_function.recursive_loop = "Terminate"
+
+        # Lambda alias for CodeDeploy traffic-shifting deployments. The API
+        # integration targets this alias rather than $LATEST, so a code change
+        # rolls out through CodeDeploy (canary in prod, all-at-once in dev) with
+        # automatic rollback on the alias error alarm — see
+        # _attach_canary_deployment. current_version publishes a new Lambda
+        # version whenever the function's code or config changes; CodeDeploy
+        # shifts the alias onto it. (Reserved concurrency stays on the function;
+        # it is shared across versions, so the alias needs none of its own.)
+        self.alias = _lambda.Alias(
+            self,
+            "LiveAlias",
+            alias_name="live",
+            version=self.function.current_version,
+        )
 
         # Grant permissions
         self.idempotency_table.grant_read_write_data(self.function)
@@ -488,7 +523,9 @@ class HelloWorldApp(Construct):
         )
 
         hello_resource = self.api.root.add_resource("hello")
-        hello_resource.add_method("GET", apigw.LambdaIntegration(self.function))
+        # Integrate with the alias (not $LATEST) so CodeDeploy traffic shifting
+        # is what actually moves production traffic onto a new version.
+        hello_resource.add_method("GET", apigw.LambdaIntegration(self.alias))
         hello_resource.add_cors_preflight(
             allow_origins=apigw.Cors.ALL_ORIGINS,
             allow_methods=["GET", "OPTIONS"],
@@ -522,6 +559,14 @@ class HelloWorldApp(Construct):
         # Regional WAF on API Gateway — closes the CloudFront-bypass window on the
         # public execute-api URL. See _attach_regional_waf for the full rationale.
         self._attach_regional_waf()
+
+        # CodeDeploy traffic-shifting deployment for the Lambda alias, with
+        # automatic rollback if the alias error alarm fires during the shift.
+        self._attach_canary_deployment(is_production_env)
+
+        # AppConfig deployment monitor: a CloudWatch alarm AppConfig watches
+        # during a flag rollout, auto-rolling-back the config if it fires.
+        self._attach_appconfig_rollback_monitor(app_config_env)
 
         self._create_insights_queries(lambda_log_group, api_log_group)
 
@@ -823,6 +868,179 @@ class HelloWorldApp(Construct):
             "ApiRegionalWebACLAssociation",
             resource_arn=self.api.deployment_stage.stage_arn,
             web_acl_arn=regional_acl.attr_arn,
+        )
+
+    def _attach_canary_deployment(self, is_production_env: bool) -> None:
+        """Wire a CodeDeploy traffic-shifting deployment onto the Lambda alias.
+
+        The API integration targets ``self.alias`` (see ``__init__``), so this is
+        what actually moves production traffic onto a new function version. A
+        code change publishes a new version; CodeDeploy then shifts the alias
+        onto it per the deployment config and watches the error alarm — if the
+        new version starts erroring during the shift, CodeDeploy rolls the alias
+        back to the previous version automatically.
+
+        The deployment config is environment-aware, mirroring the AppConfig
+        strategy and alarm-routing splits: production shifts *gradually* (canary:
+        10% of traffic for 5 minutes, then the remainder) so a bad version is
+        caught on a small blast radius; dev/ephemeral environments shift
+        all-at-once so iterating doesn't wait out a canary window. The alias,
+        deployment group, and rollback alarm exist in both shapes — only the
+        shift speed differs.
+        """
+        deployment_config = (
+            codedeploy.LambdaDeploymentConfig.CANARY_10_PERCENT_5_MINUTES
+            if is_production_env
+            else codedeploy.LambdaDeploymentConfig.ALL_AT_ONCE
+        )
+
+        # Rollback trigger: any error on the alias during the shift. A 1-minute
+        # period with a single evaluation makes CodeDeploy react fast; missing
+        # data is NOT breaching so an idle window never trips a false rollback.
+        canary_errors_alarm = cloudwatch.Alarm(
+            self,
+            "CanaryErrorsAlarm",
+            metric=self.alias.metric_errors(period=Duration.minutes(1)),
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            alarm_description="Lambda alias errors during a CodeDeploy traffic shift — triggers rollback",
+        )
+        self._suppress_rollback_alarm_actions(canary_errors_alarm, "the CodeDeploy canary rollback")
+
+        deployment_group = codedeploy.LambdaDeploymentGroup(
+            self,
+            "CanaryDeploymentGroup",
+            alias=self.alias,
+            deployment_config=deployment_config,
+            alarms=[canary_errors_alarm],
+            # Roll back on a failed deployment or if the alarm fires mid-shift.
+            auto_rollback=codedeploy.AutoRollbackConfig(failed_deployment=True, deployment_in_alarm=True),
+        )
+        NagSuppressions.add_resource_suppressions(
+            deployment_group,
+            [
+                {
+                    "id": "AwsSolutions-IAM4",
+                    "reason": "CodeDeploy service role uses the AWS managed AWSCodeDeployRoleForLambdaLimited policy — the documented least-privilege role for Lambda traffic-shifting deployments",
+                },
+            ],
+            apply_to_children=True,
+        )
+
+    def _attach_appconfig_rollback_monitor(self, app_config_env: appconfig.CfnEnvironment) -> None:
+        """Attach a CloudWatch alarm monitor to the AppConfig environment.
+
+        AppConfig watches the alarm during a flag rollout (and its bake window);
+        if the alarm enters ALARM, AppConfig rolls the configuration back to the
+        previous version automatically. This pairs with the gradual deployment
+        strategy in ``__init__`` — the gradual rollout buys the window in which
+        the monitor can act before a bad flag reaches every caller. In dev
+        (all-at-once, zero bake) the monitor is wired but effectively inert,
+        keeping the dev and prod shapes identical apart from rollout speed.
+
+        The monitored signal is the handler's ``FeatureFlagEvaluationFailure``
+        metric, NOT Lambda errors. A bad flag config is caught and degraded
+        gracefully (the request still returns 200 with the default flag value),
+        so it produces no Lambda error or 5xx — the custom metric is the only
+        signal a config is broken. AppConfig reads the alarm state through
+        ``alarm_role_arn``.
+
+        Watching a metric addressed purely by name + static dimensions (rather
+        than ``self.function.metric_errors()``) is also what keeps this wiring
+        acyclic: the environment references this alarm (monitors), so the alarm
+        must not transitively reference the function — which depends on the
+        environment via its AppConfig IAM grant. A by-name metric carries no such
+        CDK dependency.
+        """
+        # Mirror the handler's Powertools EMF emission: POWERTOOLS_METRICS_NAMESPACE
+        # is "HelloWorld" and Powertools adds the service dimension from
+        # POWERTOOLS_SERVICE_NAME ("hello-world"). Addressed by name only — no
+        # reference to the function construct (see the docstring's acyclicity note).
+        failure_metric = cloudwatch.Metric(
+            namespace="HelloWorld",
+            metric_name="FeatureFlagEvaluationFailure",
+            dimensions_map={"service": "hello-world"},
+            statistic="Sum",
+            period=Duration.minutes(1),
+        )
+        rollback_alarm = cloudwatch.Alarm(
+            self,
+            "AppConfigRollbackAlarm",
+            metric=failure_metric,
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            alarm_description="Feature-flag evaluation failures during an AppConfig rollout — triggers config rollback",
+        )
+        self._suppress_rollback_alarm_actions(rollback_alarm, "the AppConfig deployment rollback")
+
+        # AppConfig assumes this role to read the alarm state. cloudwatch:Describe
+        # Alarms has no resource-level scoping (the action only supports "*"), so
+        # the wildcard is unavoidable — see the IAM5 suppression below.
+        monitor_role = iam.Role(
+            self,
+            "AppConfigMonitorRole",
+            assumed_by=iam.ServicePrincipal("appconfig.amazonaws.com"),
+            description="Lets AppConfig read the rollback alarm state during a flag deployment",
+        )
+        monitor_role.add_to_policy(iam.PolicyStatement(actions=["cloudwatch:DescribeAlarms"], resources=["*"]))
+        NagSuppressions.add_resource_suppressions(
+            monitor_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "applies_to": ["Resource::*"],
+                    "reason": "cloudwatch:DescribeAlarms does not support resource-level permissions — the wildcard is required for AppConfig to read the rollback alarm state",
+                },
+                {
+                    "id": "NIST.800.53.R5-IAMNoInlinePolicy",
+                    "reason": "CDK-generated inline policy on the AppConfig monitor role",
+                },
+                {
+                    "id": "HIPAA.Security-IAMNoInlinePolicy",
+                    "reason": "CDK-generated inline policy on the AppConfig monitor role",
+                },
+                {
+                    "id": "PCI.DSS.321-IAMNoInlinePolicy",
+                    "reason": "CDK-generated inline policy on the AppConfig monitor role",
+                },
+            ],
+            apply_to_children=True,
+        )
+
+        # Wire the monitor onto the environment created earlier. Set here (rather
+        # than at environment-creation time) because the alarm and its role don't
+        # exist until the Lambda does.
+        app_config_env.monitors = [
+            appconfig.CfnEnvironment.MonitorsProperty(
+                alarm_arn=rollback_alarm.alarm_arn,
+                alarm_role_arn=monitor_role.role_arn,
+            )
+        ]
+
+    def _suppress_rollback_alarm_actions(self, alarm: cloudwatch.Alarm, consumer: str) -> None:
+        """Suppress the alarm-action nag rules on a deployment-rollback alarm.
+
+        ``CloudWatchAlarmAction`` (NIST/HIPAA) requires every alarm to carry a
+        notification action. These alarms are consumed by a deployment service
+        (CodeDeploy / AppConfig) that polls the alarm state to decide whether to
+        roll back — they are not a human-paging channel, so they intentionally
+        carry no SNS action. (The operational alarms under the MonitoringFacade
+        DO route to SNS in prod; only these deployment-control alarms don't.)
+        """
+        reason = (
+            f"Alarm is consumed by {consumer}, which polls its state to decide on rollback — "
+            "not a notification channel, so no SNS action by design"
+        )
+        NagSuppressions.add_resource_suppressions(
+            alarm,
+            [
+                {"id": "NIST.800.53.R5-CloudWatchAlarmAction", "reason": reason},
+                {"id": "HIPAA.Security-CloudWatchAlarmAction", "reason": reason},
+            ],
         )
 
     def _add_resource_suppressions(self, app_insights_dashboard_cleanup: cr.AwsCustomResource) -> None:

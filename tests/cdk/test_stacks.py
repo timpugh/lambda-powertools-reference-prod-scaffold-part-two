@@ -487,19 +487,101 @@ class TestBackendStack:
             },
         )
 
-    def test_alarms_exist_and_publish_to_topic(self, backend_template: Template) -> None:
-        # An alarm with no action is a dashboard widget, not an alert. Every
-        # alarm in the stack (Lambda p90 latency + API Gateway 5xx fault rate)
-        # must carry an AlarmAction referencing the SNS topic.
+    def test_operational_alarms_publish_to_topic(self, backend_template: Template) -> None:
+        # An operational alarm with no action is a dashboard widget, not an
+        # alert. Every operational alarm (Lambda p90 latency + API Gateway 5xx
+        # fault rate) must carry an AlarmAction referencing the SNS topic. The
+        # deployment-control alarms (CodeDeploy/AppConfig rollback) are excluded:
+        # they are polled by a deployment service, not a paging channel — see
+        # test_deployment_control_alarms_have_no_sns_action.
         alarms = backend_template.find_resources("AWS::CloudWatch::Alarm")
         assert len(alarms) >= 2, "expected at least the p90 latency and 5xx fault-rate alarms"
         names = json.dumps([a["Properties"].get("AlarmName") for a in alarms.values()])
         assert "Latency-P90" in names
         assert "Fault-Rate" in names
         for logical_id, alarm in alarms.items():
+            if "rollback" in alarm["Properties"].get("AlarmDescription", "").lower():
+                continue  # deployment-control alarm — asserted separately
             actions = alarm["Properties"].get("AlarmActions", [])
             assert actions, f"{logical_id} has no AlarmActions — it would fire silently"
             assert "AlarmTopic" in json.dumps(actions), f"{logical_id} must publish to the alarm topic"
+
+    def test_deployment_control_alarms_have_no_sns_action(self, backend_template: Template) -> None:
+        # The CodeDeploy canary and AppConfig rollback alarms are consumed by a
+        # deployment service that polls their state to decide on rollback — they
+        # are not a paging channel, so they intentionally carry no SNS action
+        # (and the CloudWatchAlarmAction nag rule is suppressed on them).
+        alarms = backend_template.find_resources("AWS::CloudWatch::Alarm")
+        rollback = {
+            lid: a for lid, a in alarms.items() if "rollback" in a["Properties"].get("AlarmDescription", "").lower()
+        }
+        assert len(rollback) == 2, "expected the CodeDeploy canary + AppConfig rollback alarms"
+        for logical_id, alarm in rollback.items():
+            assert not alarm["Properties"].get("AlarmActions"), (
+                f"{logical_id} is a deployment-control alarm — it must carry no SNS action"
+            )
+
+    # ── CodeDeploy canary deployment (prod shape) ────────────────────────────────
+
+    def test_lambda_alias_and_version_exist(self, backend_template: Template) -> None:
+        # The API integrates with the alias, so a version + alias must exist for
+        # CodeDeploy to shift traffic onto. The alias is named "live".
+        backend_template.resource_count_is("AWS::Lambda::Version", 1)
+        backend_template.has_resource_properties("AWS::Lambda::Alias", {"Name": "live"})
+
+    def test_api_integration_targets_the_alias(self, backend_template: Template) -> None:
+        # The GET method's integration URI must reference the alias (not the bare
+        # function) — otherwise CodeDeploy traffic shifting wouldn't move real
+        # traffic. The alias logical ID appears in the integration URI Fn::Join.
+        aliases = backend_template.find_resources("AWS::Lambda::Alias")
+        assert len(aliases) == 1
+        alias_logical_id = next(iter(aliases))
+        methods = backend_template.find_resources("AWS::ApiGateway::Method")
+        get_methods = [m for m in methods.values() if m["Properties"].get("HttpMethod") == "GET"]
+        assert get_methods, "expected a GET method"
+        assert any(alias_logical_id in json.dumps(m["Properties"]["Integration"]["Uri"]) for m in get_methods), (
+            "GET integration URI must reference the Lambda alias"
+        )
+
+    def test_codedeploy_canary_deployment_group(self, backend_template: Template) -> None:
+        # Prod uses the canary config and rolls back on a failed deploy or an
+        # alarm firing mid-shift.
+        backend_template.has_resource_properties(
+            "AWS::CodeDeploy::DeploymentGroup",
+            {
+                "DeploymentConfigName": "CodeDeployDefault.LambdaCanary10Percent5Minutes",
+                "AlarmConfiguration": Match.object_like({"Enabled": True}),
+                "AutoRollbackConfiguration": {
+                    "Enabled": True,
+                    "Events": Match.array_with(["DEPLOYMENT_FAILURE", "DEPLOYMENT_STOP_ON_ALARM"]),
+                },
+            },
+        )
+
+    # ── AppConfig gradual deployment + rollback monitor (prod shape) ──────────────
+
+    def test_appconfig_gradual_strategy_in_prod(self, backend_template: Template) -> None:
+        backend_template.has_resource_properties(
+            "AWS::AppConfig::DeploymentStrategy",
+            {
+                "GrowthType": "LINEAR",
+                "GrowthFactor": 25,
+                "DeploymentDurationInMinutes": 10,
+                "FinalBakeTimeInMinutes": 5,
+            },
+        )
+
+    def test_appconfig_environment_has_rollback_monitor(self, backend_template: Template) -> None:
+        # AppConfig auto-rolls-back a flag deployment when the monitored alarm
+        # fires; the monitor needs both the alarm ARN and a role ARN to read it.
+        backend_template.has_resource_properties(
+            "AWS::AppConfig::Environment",
+            {
+                "Monitors": Match.array_with(
+                    [Match.object_like({"AlarmArn": Match.any_value(), "AlarmRoleArn": Match.any_value()})]
+                )
+            },
+        )
 
     def test_kms_key_grants_cloudwatch_via_sns(self, backend_template: Template) -> None:
         # Without this key-policy statement the CMK-encrypted publish is denied
