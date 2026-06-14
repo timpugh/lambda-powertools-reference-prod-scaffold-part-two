@@ -1046,6 +1046,17 @@ class TestFrontendStack:
         waf_queries = [q for q in named_queries.values() if str(q["Properties"].get("Name", "")).startswith("WAF ")]
         assert len(waf_queries) == 8, f"expected 8 WAF named queries, found {len(waf_queries)}"
 
+    def test_athena_workgroup_is_recursively_deletable(self, frontend_template: Template) -> None:
+        # Running any of the shipped named queries leaves query-execution history
+        # in the workgroup, and Athena refuses to delete a non-empty workgroup —
+        # so without RecursiveDeleteOption `cdk destroy` fails once the queries
+        # have been used (hit on a live teardown). The template default is
+        # DESTROY-friendly, so the workgroup must clear itself on delete.
+        frontend_template.has_resource(
+            "AWS::Athena::WorkGroup",
+            {"Properties": Match.object_like({"RecursiveDeleteOption": True})},
+        )
+
 
 class TestAuditStack:
     """CloudTrail S3 data-event trail + its log bucket + dedicated CMK (the audit data store)."""

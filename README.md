@@ -326,7 +326,7 @@ Resources are split across five stacks. By default every resource has `RemovalPo
 | Glue Table (`cloudfront_logs`) | 33-field tab-delimited schema for CloudFront standard access logs |
 | Glue Table (`s3_access_logs`) | 26-field regex-parsed schema for S3 server access logs |
 | Glue Tables (`waf_cloudfront_logs`, `waf_regional_logs`) | JSON schema (AWS WAF log format) over the `aws-waf-logs-*` buckets, **partition-projected** on `log_time` (no crawler / `ALTER TABLE ADD PARTITION`) |
-| Athena WorkGroup | Query execution config with SSE-KMS encrypted results (per-object override on the SSE-S3 bucket), CloudWatch metrics enabled |
+| Athena WorkGroup | Query execution config with SSE-KMS encrypted results (per-object override on the SSE-S3 bucket), CloudWatch metrics enabled, and `RecursiveDeleteOption` so `cdk destroy` can drop the workgroup once its saved queries have been run (a workgroup with query history is otherwise undeletable — verified on a live teardown) |
 | Athena Named Queries (5 CloudFront + 6 S3 + 8 WAF) | Pre-built SQL: top URIs, errors, top IPs, bandwidth, cache hit ratio, top operations, requesters, slow requests, access denied, object read audit, and per-WebACL WAF recent-blocked / top-blocked-IPs / top-rules / by-country |
 | CloudWatch RUM AppMonitor | Real User Monitoring for the browser — page loads, JS errors, Core Web Vitals, fetch timings, user interactions, with X-Ray correlation |
 | Cognito Identity Pool | Unauthenticated identity pool issuing guest credentials to the browser RUM client |

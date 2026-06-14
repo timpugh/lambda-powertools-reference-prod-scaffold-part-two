@@ -1113,6 +1113,16 @@ class HelloWorldFrontendStack(Stack):
             "AccessLogsWorkGroup",
             name=workgroup_name,
             state="ENABLED",
+            # Once any saved query has been *run*, the workgroup holds query-
+            # execution history, and Athena refuses to delete a non-empty
+            # workgroup — so `cdk destroy` fails with "WorkGroup ... is not
+            # empty" (the named queries this stack ships exist to be run, so
+            # this is the normal teardown path, not an edge case — hit on a
+            # live teardown). recursive_delete_option lets CloudFormation drop
+            # the workgroup's query history with it. The query *results* in
+            # s3://.../athena-results/ are emptied separately by the
+            # auto-delete-objects custom resource on the access-log bucket.
+            recursive_delete_option=True,
             work_group_configuration=athena.CfnWorkGroup.WorkGroupConfigurationProperty(
                 result_configuration=athena.CfnWorkGroup.ResultConfigurationProperty(
                     output_location=f"s3://{access_log_bucket.bucket_name}/athena-results/",
