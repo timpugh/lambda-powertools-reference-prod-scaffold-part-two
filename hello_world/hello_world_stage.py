@@ -122,6 +122,14 @@ class HelloWorldStage(cdk.Stage):
     with DynamoDB deletion protection and stack termination protection. It
     defaults to ``False`` so the template (and ephemeral environments) tear
     down cleanly; production forks set it via ``-c retain_data=true``.
+
+    ``appconfig_monitor`` is the opt-in production switch for AppConfig feature-
+    flag rollouts: when ``True`` the flag deployment uses a gradual strategy and
+    the environment carries a CloudWatch alarm monitor that auto-rolls-back a bad
+    flag config. It defaults to ``False`` (all-at-once, no monitor) because a
+    monitored CFN-managed deployment cannot create a cold stack — see
+    :meth:`HelloWorldApp._attach_appconfig_rollback_monitor`. Set it via
+    ``-c appconfig_monitor=true`` only AFTER a first all-at-once deploy.
     """
 
     def __init__(
@@ -132,6 +140,7 @@ class HelloWorldStage(cdk.Stage):
         region: str,
         env_name: str = DEFAULT_ENV_NAME,
         retain_data: bool = False,
+        appconfig_monitor: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -190,6 +199,7 @@ class HelloWorldStage(cdk.Stage):
             stack_name=backend_stack_name,
             idempotency_table=self.data.idempotency_table,
             is_production_env=is_production_env,
+            appconfig_monitor=appconfig_monitor,
             env=target_env,
             tags=stack_tags,
         )

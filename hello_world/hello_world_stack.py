@@ -37,6 +37,7 @@ class HelloWorldStack(Stack):
         *,
         idempotency_table: dynamodb.ITableV2,
         is_production_env: bool = True,
+        appconfig_monitor: bool = False,
         **kwargs: Any,
     ) -> None:
         """Compose the application construct into a deployable stack.
@@ -52,6 +53,11 @@ class HelloWorldStack(Stack):
                 ephemeral/dev environments skip the topic. Defaults to True so
                 direct instantiation (tests, single-environment deploys)
                 matches the default ``prod`` deployment environment.
+            appconfig_monitor: Forwarded to :class:`HelloWorldApp` — when True,
+                the AppConfig flag deployment is gradual and the environment
+                carries an alarm rollback monitor. Defaults to False (all-at-once,
+                no monitor) so a cold/first deploy always succeeds; see
+                :meth:`HelloWorldApp._attach_appconfig_rollback_monitor`.
             **kwargs: Additional keyword arguments passed to the parent Stack.
         """
         super().__init__(scope, construct_id, **kwargs)
@@ -63,6 +69,7 @@ class HelloWorldStack(Stack):
             "App",
             idempotency_table=idempotency_table,
             is_production_env=is_production_env,
+            appconfig_monitor=appconfig_monitor,
         )
 
         # Expose API URL + ID for consumption by the frontend stack (api_id lets the

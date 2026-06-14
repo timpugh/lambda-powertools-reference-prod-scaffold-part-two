@@ -31,6 +31,12 @@ context key (``-c retain_data=true``). It defaults to ``false`` so the template
 tears down cleanly; production forks set it true to flip the data and audit
 stacks (tables, buckets, CMKs) to RETAIN with deletion/termination protection.
 
+The AppConfig feature-flag rollout posture is controlled by the
+``appconfig_monitor`` CDK context key (``-c appconfig_monitor=true``). It defaults
+to ``false`` (all-at-once flag deployment, no monitor) so the cold/first deploy
+always succeeds; enable it only after a first deploy to get a gradual rollout with
+alarm-driven auto-rollback for ongoing flag changes (see README "Deployment safety").
+
 The deployment environment is controlled by the ``env`` CDK context key,
 falling back to the ``ENVIRONMENT`` variable, defaulting to ``prod``.
 ``prod`` keeps the un-suffixed stack names above (so the long-lived
@@ -76,6 +82,15 @@ env_name: str = app.node.try_get_context("env") or os.environ.get("ENVIRONMENT")
 _retain_ctx = app.node.try_get_context("retain_data")
 retain_data: bool = _retain_ctx if isinstance(_retain_ctx, bool) else str(_retain_ctx).lower() == "true"
 
+# Opt-in AppConfig gradual rollout + alarm rollback monitor (`-c appconfig_monitor=true`).
+# Default False so the cold/first deploy always succeeds: a CFN-managed AppConfig
+# deployment with a monitor rolls back when its alarm is INSUFFICIENT_DATA, which a
+# fresh stack's metric always is — see hello_world_app._attach_appconfig_rollback_monitor
+# and README "Deployment safety". Turn it on only AFTER a first all-at-once deploy has
+# produced metric data, to protect ongoing flag changes.
+_monitor_ctx = app.node.try_get_context("appconfig_monitor")
+appconfig_monitor: bool = _monitor_ctx if isinstance(_monitor_ctx, bool) else str(_monitor_ctx).lower() == "true"
+
 # Stage id composition lives next to the Stage (hello_world_stage.stage_id):
 # prod keeps the legacy id so existing cdk.out assembly paths and tooling
 # keyed on the stage name stay stable; other envs get their own id.
@@ -85,6 +100,7 @@ HelloWorldStage(
     region=target_region,
     env_name=env_name,
     retain_data=retain_data,
+    appconfig_monitor=appconfig_monitor,
 )
 
 app.synth()

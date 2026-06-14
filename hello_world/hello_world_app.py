@@ -103,6 +103,7 @@ class HelloWorldApp(Construct):
         *,
         idempotency_table: dynamodb.ITableV2,
         is_production_env: bool = True,
+        appconfig_monitor: bool = False,
     ) -> None:
         """Build the application construct.
 
@@ -121,6 +122,16 @@ class HelloWorldApp(Construct):
                 environments — ephemeral per-developer/per-branch stacks in
                 particular — still get the full dashboard and alarm set, but
                 without the SNS topic so short-lived stacks never page anyone.
+            appconfig_monitor: Opt-in production switch for AppConfig feature-flag
+                rollouts. When True, the flag deployment uses a gradual strategy
+                (LINEAR 25%/step over 10 min, 5-min bake) and the environment
+                carries a CloudWatch alarm monitor that auto-rolls-back a bad flag
+                config (``_attach_appconfig_rollback_monitor``). Defaults to False
+                — all-at-once, no monitor — because a monitored CFN-managed
+                deployment **cannot create a cold stack** (the monitor alarm starts
+                ``INSUFFICIENT_DATA``, which AppConfig treats as a rollback signal).
+                Enable it only AFTER a first all-at-once deploy has produced metric
+                data; see that method and README "Deployment safety".
         """
         super().__init__(scope, construct_id)
 
@@ -281,28 +292,45 @@ class HelloWorldApp(Construct):
         # error-fallback path. CFN re-runs the deployment whenever the hosted
         # version changes (ConfigurationVersion references flags_version.ref).
         #
-        # All-at-once with zero bake. A *gradual* strategy with a CloudWatch
+        # Deployment strategy: all-at-once by default; gradual when the opt-in
+        # appconfig_monitor switch is set (it pairs with the environment monitor
+        # wired below — the bake window is what gives the monitor time to act).
+        #
+        # Why all-at-once is the default: a *gradual* strategy with a CloudWatch
         # alarm **monitor** for automatic rollback is the production-grade pattern
         # for protecting ongoing flag changes — but it cannot be wired into this
-        # CFN-managed deployment, which runs during *initial* stack creation:
+        # CFN-managed deployment when it runs during *initial* stack creation.
         # AppConfig rolls back when a monitored alarm is in ALARM **or
         # INSUFFICIENT_DATA**, and on a cold stack the rollback metric
         # (FeatureFlagEvaluationFailure, emitted only by the running Lambda) has
         # no data, so the fresh alarm sits in INSUFFICIENT_DATA and AppConfig
-        # aborts every initial deploy (verified on a live deploy). The metric is
-        # still emitted for observability; activating gradual + alarm rollback is
-        # a documented production add-on for ongoing config changes once the app
-        # has steady traffic — see README "Deployment safety" / TODO "AppConfig".
-        flags_deployment_strategy = appconfig.CfnDeploymentStrategy(
-            self,
-            "FeatureFlagsDeployStrategy",
-            name=f"{stack.stack_name}-all-at-once",
-            deployment_duration_in_minutes=0,
-            growth_factor=100,
-            growth_type="LINEAR",
-            final_bake_time_in_minutes=0,
-            replicate_to="NONE",
-        )
+        # aborts the initial deploy (verified on a live deploy). The metric is
+        # always emitted for observability; gradual + alarm rollback is opt-in via
+        # appconfig_monitor and must be turned on only AFTER a first all-at-once
+        # deploy — see _attach_appconfig_rollback_monitor and README
+        # "Deployment safety" / TODO "AppConfig".
+        if appconfig_monitor:
+            flags_deployment_strategy = appconfig.CfnDeploymentStrategy(
+                self,
+                "FeatureFlagsDeployStrategy",
+                name=f"{stack.stack_name}-gradual",
+                deployment_duration_in_minutes=10,
+                growth_factor=25,
+                growth_type="LINEAR",
+                final_bake_time_in_minutes=5,
+                replicate_to="NONE",
+            )
+        else:
+            flags_deployment_strategy = appconfig.CfnDeploymentStrategy(
+                self,
+                "FeatureFlagsDeployStrategy",
+                name=f"{stack.stack_name}-all-at-once",
+                deployment_duration_in_minutes=0,
+                growth_factor=100,
+                growth_type="LINEAR",
+                final_bake_time_in_minutes=0,
+                replicate_to="NONE",
+            )
         appconfig.CfnDeployment(
             self,
             "FeatureFlagsDeployment",
@@ -569,6 +597,12 @@ class HelloWorldApp(Construct):
         # CodeDeploy traffic-shifting deployment for the Lambda alias, with
         # automatic rollback if the alias error alarm fires during the shift.
         self._attach_canary_deployment(is_production_env)
+
+        # AppConfig deployment monitor (opt-in): a CloudWatch alarm AppConfig
+        # watches during a flag rollout, auto-rolling-back the config if it fires.
+        # Off by default — it cannot create a cold stack (see the method docstring).
+        if appconfig_monitor:
+            self._attach_appconfig_rollback_monitor(app_config_env)
 
         self._create_insights_queries(lambda_log_group, api_log_group)
 
@@ -932,15 +966,118 @@ class HelloWorldApp(Construct):
             apply_to_children=True,
         )
 
+    def _attach_appconfig_rollback_monitor(self, app_config_env: appconfig.CfnEnvironment) -> None:
+        """Attach a CloudWatch alarm monitor to the AppConfig environment.
+
+        Only called when the ``appconfig_monitor`` switch is set — it is an opt-in
+        production add-on, NOT part of the default template. AppConfig watches the
+        alarm during a flag rollout (and its bake window); if the alarm enters
+        ALARM, AppConfig rolls the configuration back to the previous version
+        automatically. This pairs with the gradual deployment strategy selected in
+        ``__init__`` under the same switch — the gradual rollout buys the window in
+        which the monitor can act before a bad flag reaches every caller.
+
+        **Cold-deploy constraint (why this is opt-in).** AppConfig rolls back when
+        the monitored alarm is in ALARM **or INSUFFICIENT_DATA**. A freshly created
+        alarm starts in INSUFFICIENT_DATA until CloudWatch's first evaluation, and
+        the ``FeatureFlagEvaluationFailure`` metric below has no datapoints at all on
+        a brand-new stack — so a monitored deployment that runs during *initial*
+        stack creation gets rolled back and the stack never reaches CREATE_COMPLETE
+        (verified on a live deploy, even with ``NOT_BREACHING`` set). Enable
+        ``appconfig_monitor`` only AFTER a first all-at-once deploy has produced
+        metric data; see README "Deployment safety".
+
+        The monitored signal is the handler's ``FeatureFlagEvaluationFailure``
+        metric, NOT Lambda errors. A bad flag config is caught and degraded
+        gracefully (the request still returns 200 with the default flag value),
+        so it produces no Lambda error or 5xx — the custom metric is the only
+        signal a config is broken. AppConfig reads the alarm state through
+        ``alarm_role_arn``.
+
+        Watching a metric addressed purely by name + static dimensions (rather
+        than ``self.function.metric_errors()``) is also what keeps this wiring
+        acyclic: the environment references this alarm (monitors), so the alarm
+        must not transitively reference the function — which depends on the
+        environment via its AppConfig IAM grant. A by-name metric carries no such
+        CDK dependency.
+        """
+        # Mirror the handler's Powertools EMF emission: POWERTOOLS_METRICS_NAMESPACE
+        # is "HelloWorld" and Powertools adds the service dimension from
+        # POWERTOOLS_SERVICE_NAME ("hello-world"). Addressed by name only — no
+        # reference to the function construct (see the docstring's acyclicity note).
+        failure_metric = cloudwatch.Metric(
+            namespace="HelloWorld",
+            metric_name="FeatureFlagEvaluationFailure",
+            dimensions_map={"service": "hello-world"},
+            statistic="Sum",
+            period=Duration.minutes(1),
+        )
+        rollback_alarm = cloudwatch.Alarm(
+            self,
+            "AppConfigRollbackAlarm",
+            metric=failure_metric,
+            threshold=1,
+            evaluation_periods=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+            alarm_description="Feature-flag evaluation failures during an AppConfig rollout — triggers config rollback",
+        )
+        self._suppress_rollback_alarm_actions(rollback_alarm, "the AppConfig deployment rollback")
+
+        # AppConfig assumes this role to read the alarm state. cloudwatch:Describe
+        # Alarms has no resource-level scoping (the action only supports "*"), so
+        # the wildcard is unavoidable — see the IAM5 suppression below.
+        monitor_role = iam.Role(
+            self,
+            "AppConfigMonitorRole",
+            assumed_by=iam.ServicePrincipal("appconfig.amazonaws.com"),
+            description="Lets AppConfig read the rollback alarm state during a flag deployment",
+        )
+        monitor_role.add_to_policy(iam.PolicyStatement(actions=["cloudwatch:DescribeAlarms"], resources=["*"]))
+        NagSuppressions.add_resource_suppressions(
+            monitor_role,
+            [
+                {
+                    "id": "AwsSolutions-IAM5",
+                    "applies_to": ["Resource::*"],
+                    "reason": "cloudwatch:DescribeAlarms does not support resource-level permissions — the wildcard is required for AppConfig to read the rollback alarm state",
+                },
+                {
+                    "id": "NIST.800.53.R5-IAMNoInlinePolicy",
+                    "reason": "CDK-generated inline policy on the AppConfig monitor role",
+                },
+                {
+                    "id": "HIPAA.Security-IAMNoInlinePolicy",
+                    "reason": "CDK-generated inline policy on the AppConfig monitor role",
+                },
+                {
+                    "id": "PCI.DSS.321-IAMNoInlinePolicy",
+                    "reason": "CDK-generated inline policy on the AppConfig monitor role",
+                },
+            ],
+            apply_to_children=True,
+        )
+
+        # Wire the monitor onto the environment created earlier. Set here (rather
+        # than at environment-creation time) because the alarm and its role don't
+        # exist until the Lambda does.
+        app_config_env.monitors = [
+            appconfig.CfnEnvironment.MonitorsProperty(
+                alarm_arn=rollback_alarm.alarm_arn,
+                alarm_role_arn=monitor_role.role_arn,
+            )
+        ]
+
     def _suppress_rollback_alarm_actions(self, alarm: cloudwatch.Alarm, consumer: str) -> None:
         """Suppress the alarm-action nag rules on a deployment-rollback alarm.
 
         ``CloudWatchAlarmAction`` (NIST/HIPAA) requires every alarm to carry a
-        notification action. The CodeDeploy canary alarm is consumed by CodeDeploy,
-        which polls its state to decide whether to roll back — it is not a
-        human-paging channel, so it intentionally carries no SNS action. (The
+        notification action. These alarms are consumed by a deployment service
+        (CodeDeploy always; AppConfig when the opt-in monitor is enabled) that
+        polls the alarm state to decide whether to roll back — they are not a
+        human-paging channel, so they intentionally carry no SNS action. (The
         operational alarms under the MonitoringFacade DO route to SNS in prod;
-        only this deployment-control alarm doesn't.)
+        only these deployment-control alarms don't.)
         """
         reason = (
             f"Alarm is consumed by {consumer}, which polls its state to decide on rollback — "

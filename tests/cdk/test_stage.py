@@ -17,6 +17,8 @@ contracts:
    (it also covers asset bundling); see CLAUDE.md.
 """
 
+import json
+
 import pytest
 
 aws_cdk = pytest.importorskip("aws_cdk", reason="aws_cdk not installed — skipping CDK stage tests")
@@ -119,6 +121,53 @@ class TestRetainDataPlumbing:
         Template.from_stack(stage.data).has_resource("AWS::DynamoDB::GlobalTable", {"DeletionPolicy": "Retain"})
 
 
+class TestAppConfigMonitorPlumbing:
+    """The Stage forwards appconfig_monitor → backend → HelloWorldApp.
+
+    Default (off) = all-at-once, no monitor (asserted in test_stacks.py — the
+    shape that must create a cold stack). On = gradual rollout + environment
+    monitor, the opt-in production add-on for ongoing flag changes.
+    """
+
+    @staticmethod
+    def _monitor_stage() -> HelloWorldStage:
+        app = cdk.App(context=_NO_BUNDLING)
+        return HelloWorldStage(app, "HelloWorld-us-east-1-stage", region="us-east-1", appconfig_monitor=True)
+
+    def test_monitor_on_uses_gradual_strategy(self) -> None:
+        # appconfig_monitor=True flows Stage → HelloWorldStack → HelloWorldApp and
+        # swaps the all-at-once strategy for a gradual one with a bake window.
+        template = Template.from_stack(self._monitor_stage().backend)
+        template.has_resource_properties(
+            "AWS::AppConfig::DeploymentStrategy",
+            {
+                "GrowthType": "LINEAR",
+                "GrowthFactor": 25,
+                "DeploymentDurationInMinutes": 10,
+                "FinalBakeTimeInMinutes": 5,
+            },
+        )
+
+    def test_monitor_on_attaches_environment_monitor(self) -> None:
+        # The environment carries a Monitors entry (alarm ARN + role ARN) so
+        # AppConfig auto-rolls-back a bad flag rollout.
+        template = Template.from_stack(self._monitor_stage().backend)
+        template.has_resource_properties(
+            "AWS::AppConfig::Environment",
+            {
+                "Monitors": Match.array_with(
+                    [Match.object_like({"AlarmArn": Match.any_value(), "AlarmRoleArn": Match.any_value()})]
+                )
+            },
+        )
+        # The monitor role AppConfig assumes to read the alarm state exists.
+        roles = template.find_resources("AWS::IAM::Role")
+        assert any(
+            "appconfig.amazonaws.com" in json.dumps(r["Properties"].get("AssumeRolePolicyDocument", {}))
+            for r in roles.values()
+        ), "expected an AppConfig-assumed monitor role when appconfig_monitor=True"
+
+
 class TestDeploymentAggressivenessByEnv:
     """CodeDeploy canary aggressiveness is environment-gated: canary in prod, fast in dev.
 
@@ -162,4 +211,13 @@ class TestNagCompliance:
         # The non-prod shape (no SNS topic) must be nag-clean too — otherwise
         # ephemeral stacks would fail the CI synth gate when env is overridden.
         errors = Annotations.from_stack(dev_stage.backend).find_error("*", Match.string_like_regexp(".*"))
+        assert not errors
+
+    def test_appconfig_monitor_shape_has_no_unsuppressed_nag_errors(self) -> None:
+        # The opt-in monitor shape adds an alarm + a cloudwatch:DescribeAlarms
+        # role; its suppressions (IAM5 wildcard, inline-policy, no-alarm-action)
+        # must be complete or a fork enabling appconfig_monitor would fail synth.
+        app = cdk.App(context=_NO_BUNDLING)
+        stage = HelloWorldStage(app, "HelloWorld-us-east-1-stage", region="us-east-1", appconfig_monitor=True)
+        errors = Annotations.from_stack(stage.backend).find_error("*", Match.string_like_regexp(".*"))
         assert not errors
