@@ -281,28 +281,26 @@ class HelloWorldApp(Construct):
         # error-fallback path. CFN re-runs the deployment whenever the hosted
         # version changes (ConfigurationVersion references flags_version.ref).
         #
-        # The deployment strategy is environment-aware, mirroring the
-        # alarm-routing split: production rolls the flag config out *gradually*
-        # (LINEAR, 25%/step over 10 min) with a 5-minute bake so the environment
-        # monitor wired in _attach_appconfig_rollback_monitor can auto-roll-back
-        # a bad config before it reaches every caller. Dev/ephemeral environments
-        # use all-at-once with zero bake so iterating on flags doesn't wait out a
-        # rollout. The rollback machinery (monitor + alarm) is wired in both
-        # shapes — only the rollout speed differs. Note the gradual rollout means
-        # a prod `cdk deploy` that changes flags blocks ~15 min until the
-        # deployment + bake complete; that wait is the point of a safe rollout.
-        if is_production_env:
-            strategy_name, deploy_minutes, growth_factor, bake_minutes = f"{stack.stack_name}-gradual", 10, 25, 5
-        else:
-            strategy_name, deploy_minutes, growth_factor, bake_minutes = f"{stack.stack_name}-all-at-once", 0, 100, 0
+        # All-at-once with zero bake. A *gradual* strategy with a CloudWatch
+        # alarm **monitor** for automatic rollback is the production-grade pattern
+        # for protecting ongoing flag changes — but it cannot be wired into this
+        # CFN-managed deployment, which runs during *initial* stack creation:
+        # AppConfig rolls back when a monitored alarm is in ALARM **or
+        # INSUFFICIENT_DATA**, and on a cold stack the rollback metric
+        # (FeatureFlagEvaluationFailure, emitted only by the running Lambda) has
+        # no data, so the fresh alarm sits in INSUFFICIENT_DATA and AppConfig
+        # aborts every initial deploy (verified on a live deploy). The metric is
+        # still emitted for observability; activating gradual + alarm rollback is
+        # a documented production add-on for ongoing config changes once the app
+        # has steady traffic — see README "Deployment safety" / TODO "AppConfig".
         flags_deployment_strategy = appconfig.CfnDeploymentStrategy(
             self,
             "FeatureFlagsDeployStrategy",
-            name=strategy_name,
-            deployment_duration_in_minutes=deploy_minutes,
-            growth_factor=growth_factor,
+            name=f"{stack.stack_name}-all-at-once",
+            deployment_duration_in_minutes=0,
+            growth_factor=100,
             growth_type="LINEAR",
-            final_bake_time_in_minutes=bake_minutes,
+            final_bake_time_in_minutes=0,
             replicate_to="NONE",
         )
         appconfig.CfnDeployment(
@@ -571,10 +569,6 @@ class HelloWorldApp(Construct):
         # CodeDeploy traffic-shifting deployment for the Lambda alias, with
         # automatic rollback if the alias error alarm fires during the shift.
         self._attach_canary_deployment(is_production_env)
-
-        # AppConfig deployment monitor: a CloudWatch alarm AppConfig watches
-        # during a flag rollout, auto-rolling-back the config if it fires.
-        self._attach_appconfig_rollback_monitor(app_config_env)
 
         self._create_insights_queries(lambda_log_group, api_log_group)
 
@@ -938,107 +932,15 @@ class HelloWorldApp(Construct):
             apply_to_children=True,
         )
 
-    def _attach_appconfig_rollback_monitor(self, app_config_env: appconfig.CfnEnvironment) -> None:
-        """Attach a CloudWatch alarm monitor to the AppConfig environment.
-
-        AppConfig watches the alarm during a flag rollout (and its bake window);
-        if the alarm enters ALARM, AppConfig rolls the configuration back to the
-        previous version automatically. This pairs with the gradual deployment
-        strategy in ``__init__`` — the gradual rollout buys the window in which
-        the monitor can act before a bad flag reaches every caller. In dev
-        (all-at-once, zero bake) the monitor is wired but effectively inert,
-        keeping the dev and prod shapes identical apart from rollout speed.
-
-        The monitored signal is the handler's ``FeatureFlagEvaluationFailure``
-        metric, NOT Lambda errors. A bad flag config is caught and degraded
-        gracefully (the request still returns 200 with the default flag value),
-        so it produces no Lambda error or 5xx — the custom metric is the only
-        signal a config is broken. AppConfig reads the alarm state through
-        ``alarm_role_arn``.
-
-        Watching a metric addressed purely by name + static dimensions (rather
-        than ``self.function.metric_errors()``) is also what keeps this wiring
-        acyclic: the environment references this alarm (monitors), so the alarm
-        must not transitively reference the function — which depends on the
-        environment via its AppConfig IAM grant. A by-name metric carries no such
-        CDK dependency.
-        """
-        # Mirror the handler's Powertools EMF emission: POWERTOOLS_METRICS_NAMESPACE
-        # is "HelloWorld" and Powertools adds the service dimension from
-        # POWERTOOLS_SERVICE_NAME ("hello-world"). Addressed by name only — no
-        # reference to the function construct (see the docstring's acyclicity note).
-        failure_metric = cloudwatch.Metric(
-            namespace="HelloWorld",
-            metric_name="FeatureFlagEvaluationFailure",
-            dimensions_map={"service": "hello-world"},
-            statistic="Sum",
-            period=Duration.minutes(1),
-        )
-        rollback_alarm = cloudwatch.Alarm(
-            self,
-            "AppConfigRollbackAlarm",
-            metric=failure_metric,
-            threshold=1,
-            evaluation_periods=1,
-            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
-            alarm_description="Feature-flag evaluation failures during an AppConfig rollout — triggers config rollback",
-        )
-        self._suppress_rollback_alarm_actions(rollback_alarm, "the AppConfig deployment rollback")
-
-        # AppConfig assumes this role to read the alarm state. cloudwatch:Describe
-        # Alarms has no resource-level scoping (the action only supports "*"), so
-        # the wildcard is unavoidable — see the IAM5 suppression below.
-        monitor_role = iam.Role(
-            self,
-            "AppConfigMonitorRole",
-            assumed_by=iam.ServicePrincipal("appconfig.amazonaws.com"),
-            description="Lets AppConfig read the rollback alarm state during a flag deployment",
-        )
-        monitor_role.add_to_policy(iam.PolicyStatement(actions=["cloudwatch:DescribeAlarms"], resources=["*"]))
-        NagSuppressions.add_resource_suppressions(
-            monitor_role,
-            [
-                {
-                    "id": "AwsSolutions-IAM5",
-                    "applies_to": ["Resource::*"],
-                    "reason": "cloudwatch:DescribeAlarms does not support resource-level permissions — the wildcard is required for AppConfig to read the rollback alarm state",
-                },
-                {
-                    "id": "NIST.800.53.R5-IAMNoInlinePolicy",
-                    "reason": "CDK-generated inline policy on the AppConfig monitor role",
-                },
-                {
-                    "id": "HIPAA.Security-IAMNoInlinePolicy",
-                    "reason": "CDK-generated inline policy on the AppConfig monitor role",
-                },
-                {
-                    "id": "PCI.DSS.321-IAMNoInlinePolicy",
-                    "reason": "CDK-generated inline policy on the AppConfig monitor role",
-                },
-            ],
-            apply_to_children=True,
-        )
-
-        # Wire the monitor onto the environment created earlier. Set here (rather
-        # than at environment-creation time) because the alarm and its role don't
-        # exist until the Lambda does.
-        app_config_env.monitors = [
-            appconfig.CfnEnvironment.MonitorsProperty(
-                alarm_arn=rollback_alarm.alarm_arn,
-                alarm_role_arn=monitor_role.role_arn,
-            )
-        ]
-
     def _suppress_rollback_alarm_actions(self, alarm: cloudwatch.Alarm, consumer: str) -> None:
         """Suppress the alarm-action nag rules on a deployment-rollback alarm.
 
         ``CloudWatchAlarmAction`` (NIST/HIPAA) requires every alarm to carry a
-        notification action. These alarms are consumed by a deployment service
-        (CodeDeploy / AppConfig) that polls the alarm state to decide whether to
-        roll back — they are not a human-paging channel, so they intentionally
-        carry no SNS action. (The operational alarms under the MonitoringFacade
-        DO route to SNS in prod; only these deployment-control alarms don't.)
+        notification action. The CodeDeploy canary alarm is consumed by CodeDeploy,
+        which polls its state to decide whether to roll back — it is not a
+        human-paging channel, so it intentionally carries no SNS action. (The
+        operational alarms under the MonitoringFacade DO route to SNS in prod;
+        only this deployment-control alarm doesn't.)
         """
         reason = (
             f"Alarm is consumed by {consumer}, which polls its state to decide on rollback — "

@@ -563,9 +563,9 @@ class TestBackendStack:
         # An operational alarm with no action is a dashboard widget, not an
         # alert. Every operational alarm (Lambda p90 latency + API Gateway 5xx
         # fault rate) must carry an AlarmAction referencing the SNS topic. The
-        # deployment-control alarms (CodeDeploy/AppConfig rollback) are excluded:
-        # they are polled by a deployment service, not a paging channel — see
-        # test_deployment_control_alarms_have_no_sns_action.
+        # the CodeDeploy canary rollback alarm is excluded: it is polled by
+        # CodeDeploy, not a paging channel — see
+        # test_deployment_control_alarm_has_no_sns_action.
         alarms = backend_template.find_resources("AWS::CloudWatch::Alarm")
         assert len(alarms) >= 2, "expected at least the p90 latency and 5xx fault-rate alarms"
         names = json.dumps([a["Properties"].get("AlarmName") for a in alarms.values()])
@@ -578,16 +578,15 @@ class TestBackendStack:
             assert actions, f"{logical_id} has no AlarmActions — it would fire silently"
             assert "AlarmTopic" in json.dumps(actions), f"{logical_id} must publish to the alarm topic"
 
-    def test_deployment_control_alarms_have_no_sns_action(self, backend_template: Template) -> None:
-        # The CodeDeploy canary and AppConfig rollback alarms are consumed by a
-        # deployment service that polls their state to decide on rollback — they
-        # are not a paging channel, so they intentionally carry no SNS action
-        # (and the CloudWatchAlarmAction nag rule is suppressed on them).
+    def test_deployment_control_alarm_has_no_sns_action(self, backend_template: Template) -> None:
+        # The CodeDeploy canary alarm is consumed by CodeDeploy, which polls its
+        # state to decide on rollback — it's not a paging channel, so it carries
+        # no SNS action (and the CloudWatchAlarmAction nag rule is suppressed).
         alarms = backend_template.find_resources("AWS::CloudWatch::Alarm")
         rollback = {
             lid: a for lid, a in alarms.items() if "rollback" in a["Properties"].get("AlarmDescription", "").lower()
         }
-        assert len(rollback) == 2, "expected the CodeDeploy canary + AppConfig rollback alarms"
+        assert len(rollback) == 1, "expected the CodeDeploy canary rollback alarm"
         for logical_id, alarm in rollback.items():
             assert not alarm["Properties"].get("AlarmActions"), (
                 f"{logical_id} is a deployment-control alarm — it must carry no SNS action"
@@ -630,30 +629,24 @@ class TestBackendStack:
             },
         )
 
-    # ── AppConfig gradual deployment + rollback monitor (prod shape) ──────────────
+    # ── AppConfig deployment (all-at-once; no CFN-wired rollback monitor) ──────────
 
-    def test_appconfig_gradual_strategy_in_prod(self, backend_template: Template) -> None:
+    def test_appconfig_strategy_is_all_at_once(self, backend_template: Template) -> None:
+        # The CFN-managed AppConfig deployment runs during initial provisioning,
+        # where a monitored alarm would be INSUFFICIENT_DATA (no traffic yet) and
+        # AppConfig would auto-roll-back the cold deploy. So the strategy is
+        # all-at-once and the environment carries no monitor — gradual + alarm
+        # rollback is a documented production add-on for ongoing config changes.
         backend_template.has_resource_properties(
             "AWS::AppConfig::DeploymentStrategy",
-            {
-                "GrowthType": "LINEAR",
-                "GrowthFactor": 25,
-                "DeploymentDurationInMinutes": 10,
-                "FinalBakeTimeInMinutes": 5,
-            },
+            {"GrowthFactor": 100, "DeploymentDurationInMinutes": 0, "FinalBakeTimeInMinutes": 0},
         )
 
-    def test_appconfig_environment_has_rollback_monitor(self, backend_template: Template) -> None:
-        # AppConfig auto-rolls-back a flag deployment when the monitored alarm
-        # fires; the monitor needs both the alarm ARN and a role ARN to read it.
-        backend_template.has_resource_properties(
-            "AWS::AppConfig::Environment",
-            {
-                "Monitors": Match.array_with(
-                    [Match.object_like({"AlarmArn": Match.any_value(), "AlarmRoleArn": Match.any_value()})]
-                )
-            },
-        )
+    def test_appconfig_environment_has_no_monitor(self, backend_template: Template) -> None:
+        # No CloudWatch monitor on the environment (see test above for why).
+        envs = backend_template.find_resources("AWS::AppConfig::Environment")
+        (env,) = envs.values()
+        assert not env["Properties"].get("Monitors"), "AppConfig env must not carry a rollback monitor on cold deploy"
 
     def test_kms_key_grants_cloudwatch_via_sns(self, backend_template: Template) -> None:
         # Without this key-policy statement the CMK-encrypted publish is denied
