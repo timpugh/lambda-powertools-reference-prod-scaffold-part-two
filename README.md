@@ -382,6 +382,24 @@ The intent is that a production fork "forgets the `RETAIN` flag" at worst — a 
 
 **Dedicated CMK.** The table is encrypted by *this* stack's own key, not the compute stack's. Keeping the key with the data it protects is what makes retention meaningful — a retained table whose key lived in a destroyable compute stack would be unreadable once that stack is torn down. It also means keys are never shared across the stack boundary, so each carries a tighter, least-privilege key policy. (PITR is enabled for point-in-time recovery; a `retain_data=true` fork should additionally enroll the table in an AWS Backup plan — see [`TODO.md`](TODO.md). The `DynamoDBInBackupPlan` nag suppressions live on the data stack accordingly.)
 
+#### Production switches and where to set them (`cdk.json`)
+
+The template has two production-fork switches, both CDK **context** flags that default `false`: `retain_data` (above) and `appconfig_monitor` ([Deployment safety](#deployment-safety-canary-lambda)). Knowing *where* to set them matters as much as what they do, because context can be supplied two ways and they don't behave the same way over a stack's life:
+
+- **`cdk.json` (sticky).** A value in the `context` block of [`cdk.json`](cdk.json) applies to **every** `cdk deploy` / `make deploy`. This is the home for a setting you want to be permanent — a production fork sets it once and never thinks about it again.
+- **`-c flag=true` on the CLI (per-run).** A CLI context value overrides `cdk.json` for that **single** invocation. Good for one-off operations, but **not** sticky: the *next* plain `make deploy` reverts to whatever `cdk.json` says.
+
+That non-stickiness is a real hazard for `retain_data`: if you enable retention only with a one-off `-c retain_data=true`, a later plain `make deploy` flips the table and CMK **back** to `DESTROY` and turns deletion/termination protection **off** — silently un-protecting production data. So for a production fork, set it in `cdk.json` (`"retain_data": true`), not just on the CLI. This is also why there is **no** `make deploy-retain-data` target: a per-deploy command you must remember every time would be exactly that footgun, and the flag needs no cold-deploy guard the way `appconfig_monitor` does.
+
+The two switches differ in one critical way — **when they're safe to enable**:
+
+| Switch | Safe on the **first/cold** deploy? | Recommended home |
+|---|---|---|
+| `retain_data` | **Yes** — set it before the first deploy if you like | `cdk.json` from day one |
+| `appconfig_monitor` | **No** — a monitored deployment aborts the cold create (its alarm starts `INSUFFICIENT_DATA`; see [Deployment safety](#deployment-safety-canary-lambda)) | `cdk.json` **only after** a first successful deploy — until then use the guarded `make deploy-appconfig-monitor` |
+
+`cdk.json` therefore ships with `retain_data` pre-listed (explicitly `false`, ready to flip) and `appconfig_monitor` deliberately *omitted* — so a forker can't accidentally enable the monitor on the cold deploy by editing one line. Both flags are normalised in [`app.py`](app.py) to accept a native JSON bool (`cdk.json`) or a CLI string (`-c flag=true`).
+
 ### Deployment safety (canary Lambda)
 
 A bad **code** deploy gets a progressive-delivery mechanism with automatic, alarm-driven rollback, wired in [`hello_world_app.py`](hello_world/hello_world_app.py). Like the alarm-routing split, its *aggressiveness* is environment-gated: canary in prod, fast in dev. The machinery (alias, deployment group, alarm) exists in both shapes — only the rollout speed differs, so dev and prod stay structurally identical.
