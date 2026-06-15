@@ -242,12 +242,16 @@ jobs:
 
       # Stdlib-only driver (no extra dependency): for each stack it runs
       # `cdk diff --template <base> --app <pr-assembly>` — no re-synth, no AWS.
+      # Runs from the PR checkout so the script's `npx cdk` resolves the PINNED
+      # CLI in pr/node_modules (from the repo root npx would fetch an unpinned
+      # one). Paths are relative to pr/; the report lands at the workspace root.
       - name: Render CDK diff
+        working-directory: pr
         run: |
-          python3 pr/scripts/cdk_pr_diff.py \
-            --pr-out pr/cdk.out --base-out base/cdk.out \
-            --base-ref "${{ github.base_ref }}" --output cdk-diff.md
-          cat cdk-diff.md >> "$GITHUB_STEP_SUMMARY"
+          python3 scripts/cdk_pr_diff.py \
+            --pr-out cdk.out --base-out ../base/cdk.out \
+            --base-ref "${{ github.base_ref }}" --output ../cdk-diff.md
+          cat ../cdk-diff.md >> "$GITHUB_STEP_SUMMARY"
 
       # Sticky comment: update the existing bot comment in place (matched by a
       # hidden marker) instead of stacking a new one per push. Best-effort —
