@@ -254,7 +254,7 @@ The `@idempotent` decorator uses a DynamoDB table to prevent duplicate processin
 
 #### Parameters
 
-`get_parameter()` fetches the greeting message from SSM Parameter Store. The parameter path is set via the `GREETING_PARAM_NAME` environment variable. Values are cached automatically by Powertools to reduce API calls.
+An explicit `SSMProvider` instance fetches the greeting message via `ssm_provider.get()` — rather than the module-level `get_parameter()` helper, so the shared retry config can be injected (see [Design decisions](#design-decisions-and-known-limitations)). The parameter path is set via the `GREETING_PARAM_NAME` environment variable, and Powertools caches the value in-memory (5-minute TTL) to reduce API calls.
 
 #### Feature Flags
 
@@ -862,7 +862,7 @@ Every CDK operation against this project should go through `make`, not bare `cdk
 
 | Phase | Target | What it does |
 |---|---|---|
-| Discovery | `make cdk-ls` | List all stacks (Backend, WAF, Frontend) — sanity check after stack-graph refactors. |
+| Discovery | `make cdk-ls` | List all five stacks (Data, WAF, Backend, Frontend, Audit) — sanity check after stack-graph refactors. |
 | Pre-deploy | `make cdk-synth` | Synthesize all five stacks and run the five cdk-nag rule packs (hard gate — see [CDK security checks](#cdk-security-checks)). |
 | Pre-deploy | `make cdk-diff` | Preview changes against the currently deployed stacks (requires AWS credentials). |
 | Pre-deploy | `make cdk-notices` | Show AWS-published CDK notices (CVEs, deprecated CDK versions, upcoming breaking changes). |
@@ -1039,7 +1039,7 @@ Unit tests mock all external AWS dependencies so they run locally without creden
 
 - **Shared fixtures** in `tests/conftest.py` (API Gateway event, Lambda context, app module reference). The autouse mock for SSM Parameters and Feature Flags lives in `tests/unit/conftest.py` so it only applies to unit tests.
 - **Env vars centralized** in `pyproject.toml` via pytest-env — Powertools config, mock resource names, `POWERTOOLS_IDEMPOTENCY_DISABLED=true` (the Powertools-recommended way to skip DynamoDB calls during tests; not set in production), and `AWS_DEFAULT_REGION` so the suite is hermetic (boto3 clients are built at import and need a region even when mocked — see [Pytest behavior](#pytest-behavior)).
-- **External calls mocked** via `pytest-mock`'s `mocker.patch.object()` against `get_parameter` and `feature_flags.evaluate`. The Lambda context is a `MagicMock` with realistic attributes.
+- **External calls mocked** via `pytest-mock`'s `mocker.patch.object()` against the module's `ssm_provider.get` and `feature_flags.evaluate`. The Lambda context is a `MagicMock` with realistic attributes.
 - **Import path isolation** — `tests/conftest.py` puts `lambda/` on `sys.path` before the root so `import app` resolves to the Lambda handler (`lambda/app.py`), not the CDK entry point (`app.py`).
 
 ```bash
@@ -1382,10 +1382,10 @@ Structural complexity thresholds. Pylint fails if any function or class exceeds 
 | Threshold | Value | What it limits |
 |---|---|---|
 | `max-args` | 8 | Parameters per function |
-| `max-locals` | 25 | Local variables per function |
+| `max-locals` | 32 | Local variables per function |
 | `max-returns` | 6 | Return statements per function |
 | `max-branches` | 12 | Branches (if/for/while/try) per function |
-| `max-statements` | 50 | Statements per function body |
+| `max-statements` | 55 | Statements per function body |
 | `max-attributes` | 10 | Instance attributes per class |
 
 #### `[tool.pytest.ini_options]`
