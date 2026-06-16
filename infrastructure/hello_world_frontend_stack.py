@@ -46,7 +46,7 @@ from aws_cdk import (
 from cdk_nag import NagSuppressions
 from constructs import Construct
 
-from hello_world.nag_utils import (
+from infrastructure.nag_utils import (
     AWS_CUSTOM_RESOURCE_PROVIDER_ID,
     BUCKET_DEPLOYMENT_PROVIDER_ID,
     apply_compliance_aspects,

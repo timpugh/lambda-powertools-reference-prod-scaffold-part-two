@@ -65,7 +65,7 @@ toggle.name = "Switch to light mode"
 # -----------------------------------------------------------------------------
 # mkdocstrings powers the Python autodoc directive (::: module.path) used on
 # the code-reference pages. It reads the Google-style docstrings already in
-# lambda/app.py and hello_world/*.py and renders them as navigable reference
+# lambda/app.py and infrastructure/*.py and renders them as navigable reference
 # pages. Both source directories must be on the handler's paths list.
 [project.plugins.mkdocstrings]
 default_handler = "python"

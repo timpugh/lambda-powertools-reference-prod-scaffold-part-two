@@ -15,7 +15,7 @@ from aws_cdk import (
 from cdk_nag import NagSuppressions
 from constructs import Construct
 
-from hello_world.nag_utils import (
+from infrastructure.nag_utils import (
     apply_compliance_aspects,
     build_managed_threat_rules,
     create_auto_delete_objects_log_group,

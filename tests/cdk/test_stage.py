@@ -26,7 +26,7 @@ aws_cdk = pytest.importorskip("aws_cdk", reason="aws_cdk not installed — skipp
 import aws_cdk as cdk
 from aws_cdk.assertions import Annotations, Match, Template
 
-from hello_world.hello_world_stage import DEFAULT_ENV_NAME, HelloWorldStage, validate_env_name
+from infrastructure.hello_world_stage import DEFAULT_ENV_NAME, HelloWorldStage, validate_env_name
 
 # Skip Docker bundling so these tests run without Docker (same key the CLI honours).
 _NO_BUNDLING = {"aws:cdk:bundling-stacks": []}

@@ -79,7 +79,7 @@ from cdk_monitoring_constructs import (
 from cdk_nag import NagSuppressions
 from constructs import Construct
 
-from hello_world.nag_utils import (
+from infrastructure.nag_utils import (
     build_managed_threat_rules,
     create_auto_delete_objects_log_group,
     create_waf_logs_bucket,

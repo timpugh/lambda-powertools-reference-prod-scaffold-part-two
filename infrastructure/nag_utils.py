@@ -4,7 +4,7 @@
 stack so every stack exercises the same compliance gauntlet, plus this
 project's own ``TemplateConventionChecks`` validation Aspect (log-group
 retention + explicit removal policy on stateful resources — see
-``hello_world.validation_aspects``). NIST 800-53 R4 is intentionally omitted —
+``infrastructure.validation_aspects``). NIST 800-53 R4 is intentionally omitted —
 R5 supersedes it and running both would duplicate findings on overlapping
 controls.
 
@@ -43,7 +43,7 @@ from cdk_nag import (
 )
 from constructs import Construct, IConstruct
 
-from hello_world.validation_aspects import TemplateConventionChecks
+from infrastructure.validation_aspects import TemplateConventionChecks
 
 # CDK-managed singleton Lambda construct IDs. Derived from CDK's own source
 # hashes; stable for years and unaffected by rescoping stacks under a cdk.Stage.

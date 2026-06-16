@@ -95,7 +95,7 @@ repos:
     hooks:
       - id: xenon
         name: xenon complexity check
-        entry: xenon --max-absolute B --max-modules A --max-average A lambda/ hello_world/
+        entry: xenon --max-absolute B --max-modules A --max-average A lambda/ infrastructure/
         language: system
         types: [python]
         pass_filenames: false

@@ -8,9 +8,9 @@ synths from mixing their templates in the root of ``cdk.out/``.
 
 Two stacks hold the stateful resources, kept separate from the stateless
 compute so their lifecycles are independent: the **data** stack (the DynamoDB
-idempotency table + its CMK — see :mod:`hello_world.hello_world_data_stack`) and
+idempotency table + its CMK — see :mod:`infrastructure.hello_world_data_stack`) and
 the **audit** stack (the CloudTrail data-event trail + its log bucket + a CMK —
-see :mod:`hello_world.hello_world_audit_stack`). The audit stack is created last
+see :mod:`infrastructure.hello_world_audit_stack`). The audit stack is created last
 because it *audits* the frontend buckets (a one-way dependency).
 
 This change also paves the way for CDK Pipelines (each Stage is the natural
@@ -42,12 +42,12 @@ from typing import Any
 import aws_cdk as cdk
 from constructs import Construct
 
-from hello_world.hello_world_audit_stack import HelloWorldAuditStack
-from hello_world.hello_world_data_stack import HelloWorldDataStack
-from hello_world.hello_world_frontend_stack import HelloWorldFrontendStack
-from hello_world.hello_world_stack import HelloWorldStack
-from hello_world.hello_world_waf_stack import HelloWorldWafStack
-from hello_world.nag_utils import waf_logs_bucket_name
+from infrastructure.hello_world_audit_stack import HelloWorldAuditStack
+from infrastructure.hello_world_data_stack import HelloWorldDataStack
+from infrastructure.hello_world_frontend_stack import HelloWorldFrontendStack
+from infrastructure.hello_world_stack import HelloWorldStack
+from infrastructure.hello_world_waf_stack import HelloWorldWafStack
+from infrastructure.nag_utils import waf_logs_bucket_name
 
 # The environment every deployment lands in unless overridden via
 # `-c env=<name>` (or the ENVIRONMENT variable — see app.py). "prod" keeps

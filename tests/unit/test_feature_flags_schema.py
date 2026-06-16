@@ -1,6 +1,6 @@
 """Validate the AppConfig feature-flag content against the Powertools schema.
 
-The flag JSON lives in ``hello_world/feature_flags.json`` — one file read by
+The flag JSON lives in ``infrastructure/feature_flags.json`` — one file read by
 the CDK construct at synth time (which can only ``json.loads`` it, because
 Powertools is not installable next to aws-cdk-lib; see the attrs conflict in
 pyproject.toml) and by this test, which runs in the Lambda-side venv where
@@ -31,7 +31,7 @@ _feature_flags = pytest.importorskip(
 SchemaValidator = _feature_flags.SchemaValidator
 SchemaValidationError = _feature_flags.exceptions.SchemaValidationError
 
-FLAGS_PATH = Path(__file__).resolve().parents[2] / "hello_world" / "feature_flags.json"
+FLAGS_PATH = Path(__file__).resolve().parents[2] / "infrastructure" / "feature_flags.json"
 
 
 def test_feature_flags_file_matches_powertools_schema():

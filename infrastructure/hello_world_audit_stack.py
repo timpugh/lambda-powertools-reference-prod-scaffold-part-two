@@ -37,7 +37,7 @@ from aws_cdk import aws_s3 as s3
 from cdk_nag import NagSuppressions
 from constructs import Construct
 
-from hello_world.nag_utils import (
+from infrastructure.nag_utils import (
     apply_compliance_aspects,
     create_auto_delete_objects_log_group,
     create_sse_s3_log_bucket,

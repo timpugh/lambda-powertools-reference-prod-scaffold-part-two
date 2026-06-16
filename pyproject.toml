@@ -31,7 +31,7 @@ lambda = [
     "boto3==1.43.2",
 ]
 
-# CDK infrastructure — used by `app.py`, `hello_world/`, and the CDK stack
+# CDK infrastructure — used by `app.py`, `infrastructure/`, and the CDK stack
 # assertion tests. Conflicts with `lambda` at the `attrs` pin (CDK requires
 # attrs<26 via jsii; Powertools requires attrs>=26).
 cdk = [
@@ -178,7 +178,7 @@ init_typed = true                      # type-check constructor args instead of 
 warn_required_dynamic_aliases = true   # warn when a required field uses a dynamic alias mypy can't verify
 
 # Tests are deliberately outside the mypy gate: the pre-commit hook excludes
-# tests/ and `make typecheck` only passes hello_world/, lambda/, and scripts/.
+# tests/ and `make typecheck` only passes infrastructure/, lambda/, and scripts/.
 # Encoding that policy here (not just in hook excludes) keeps the editor's
 # mypy extension — which type-checks any opened file against this config —
 # in agreement with the CLI gates, instead of flagging strict-mode errors

@@ -135,11 +135,11 @@ test-integration: ## Run integration tests against a deployed stack (uses .venv-
 # (microsoft/vscode-python#25643). This target sidesteps both: it runs the CDK
 # suite under .venv and the unit suite under .venv-lambda, each appending into
 # ONE shared .coverage (--cov-append, no erase between runs), then renders a
-# single HTML report spanning hello_world/ (covered by the CDK tests) and
+# single HTML report spanning infrastructure/ (covered by the CDK tests) and
 # lambda/ (covered by the unit tests). --override-ini=addopts= drops the global
 # unit-only flags (--cov=lambda, the 100% gate, -n auto) so this run sets its
 # own --cov targets and is NOT gated — the combined total is informational
-# (hello_world/ carries intentional uncovered defensive lines), while the 100%
+# (infrastructure/ carries intentional uncovered defensive lines), while the 100%
 # lambda/ gate stays enforced by `make test` and CI. Integration tests are
 # excluded: they need a live stack. coverage is invoked via `python -m` so it
 # resolves from each venv's pytest-cov install without relying on a console
@@ -157,12 +157,12 @@ test-integration: ## Run integration tests against a deployed stack (uses .venv-
 # badge (the aspect's error-emitting branch isn't exercised under --cov); that
 # branch is still run by cdk-check's full no-coverage suite.
 _CDK_COV_DESELECT = --deselect "tests/cdk/test_validation_aspects.py::TestRemovalPolicyInvariant::test_raw_l1_bucket_without_removal_policy_errors" --deselect "tests/cdk/test_validation_aspects.py::TestLogRetentionInvariant::test_log_group_without_retention_errors"
-_CDK_COV = uv run pytest tests/cdk --override-ini="addopts=" --cov=hello_world --cov=lambda --cov-branch --cov-append -q $(_CDK_COV_DESELECT)
+_CDK_COV = uv run pytest tests/cdk --override-ini="addopts=" --cov=infrastructure --cov=lambda --cov-branch --cov-append -q $(_CDK_COV_DESELECT)
 
-coverage: ## Combined coverage report across both venvs (hello_world/ + lambda/), opens HTML
+coverage: ## Combined coverage report across both venvs (infrastructure/ + lambda/), opens HTML
 	rm -f .coverage
 	$(_CDK_COV)
-	$(LAMBDA_RUN) pytest tests/unit --override-ini="addopts=" --cov=hello_world --cov=lambda --cov-branch --cov-append -q
+	$(LAMBDA_RUN) pytest tests/unit --override-ini="addopts=" --cov=infrastructure --cov=lambda --cov-branch --cov-append -q
 	uv run python -m coverage report
 	uv run python -m coverage html
 	open htmlcov/index.html
@@ -178,10 +178,10 @@ coverage: ## Combined coverage report across both venvs (hello_world/ + lambda/)
 # unit-only flags so this run sets its own --cov targets and isn't gated (the
 # combined ~96% is informational; the 100% lambda/ gate stays in `make test`/CI).
 COVERAGE_BADGE_JSON ?= coverage-badge.json
-coverage-badge: ## Generate the shields-endpoint coverage badge JSON (whole repo: hello_world/ + lambda/)
+coverage-badge: ## Generate the shields-endpoint coverage badge JSON (whole repo: infrastructure/ + lambda/)
 	rm -f .coverage .coverage.json
 	$(_CDK_COV)
-	$(LAMBDA_RUN) pytest tests/unit --override-ini="addopts=" --cov=hello_world --cov=lambda --cov-branch --cov-append -q
+	$(LAMBDA_RUN) pytest tests/unit --override-ini="addopts=" --cov=infrastructure --cov=lambda --cov-branch --cov-append -q
 	uv run python -m coverage json -o .coverage.json
 	uv run python -c 'import json; t=round(json.load(open(".coverage.json"))["totals"]["percent_covered"]); c="brightgreen" if t>=95 else "green" if t>=90 else "yellow" if t>=75 else "red"; json.dump({"schemaVersion":1,"label":"coverage","message":str(t)+"%","color":c}, open("$(COVERAGE_BADGE_JSON)","w"))'
 	@echo "Wrote $(COVERAGE_BADGE_JSON): $$(cat $(COVERAGE_BADGE_JSON))"
@@ -482,13 +482,13 @@ typecheck: ## Run mypy type checking (CDK side in .venv, Lambda runtime + script
 	# helpers that import from it (notably scripts/generate_openapi.py).
 	# The pre-commit mypy hook holds the CDK side and excludes scripts/ for
 	# the same reason — see .pre-commit-config.yaml.
-	uv run mypy hello_world/
+	uv run mypy infrastructure/
 	$(LAMBDA_RUN) mypy lambda/ scripts/
 
 security: ## Run bandit security scan and pip-audit vulnerability check
 	# scripts/ is included to match the typecheck target and the pre-commit bandit
 	# hook; bandit only scans .py files, so the shell scripts are harmlessly ignored.
-	uv run bandit -r lambda/ hello_world/ scripts/
+	uv run bandit -r lambda/ infrastructure/ scripts/
 	# pip-audit goes through the pre-commit hook so the --ignore-vuln list
 	# (currently CVE-2026-3219 — pip 26.0.1, no upstream fix) is sourced
 	# from .pre-commit-config.yaml. Invoking pip-audit directly here would

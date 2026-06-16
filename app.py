@@ -62,7 +62,7 @@ import os
 
 import aws_cdk as cdk
 
-from hello_world.hello_world_stage import DEFAULT_ENV_NAME, HelloWorldStage, stage_id
+from infrastructure.hello_world_stage import DEFAULT_ENV_NAME, HelloWorldStage, stage_id
 
 app = cdk.App()
 

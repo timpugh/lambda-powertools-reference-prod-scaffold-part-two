@@ -6,8 +6,8 @@ from aws_cdk import aws_iam as iam
 from cdk_nag import NagSuppressions
 from constructs import Construct
 
-from hello_world.hello_world_app import HelloWorldApp
-from hello_world.nag_utils import (
+from infrastructure.hello_world_app import HelloWorldApp
+from infrastructure.nag_utils import (
     AWS_CUSTOM_RESOURCE_PROVIDER_ID,
     apply_compliance_aspects,
     attach_async_failure_destination,

@@ -1,6 +1,6 @@
 # Hello World Application Construct
 
-The `hello_world.hello_world_app` module hosts the domain construct
+The `infrastructure.hello_world_app` module hosts the domain construct
 (`HelloWorldApp`) that owns every backend resource — the KMS key, DynamoDB
 idempotency table, SSM greeting parameter, AppConfig application/environment/
 profile, the Lambda function, the API Gateway REST API, the CloudWatch
@@ -12,4 +12,4 @@ and attaches stack-level cdk-nag suppressions; everything else lives here.
 
 ## API reference
 
-::: hello_world.hello_world_app
+::: infrastructure.hello_world_app

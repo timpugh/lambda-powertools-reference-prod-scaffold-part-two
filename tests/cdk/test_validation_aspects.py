@@ -18,7 +18,7 @@ from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
 from aws_cdk.assertions import Annotations, Match
 
-from hello_world.validation_aspects import TemplateConventionChecks
+from infrastructure.validation_aspects import TemplateConventionChecks
 
 _TEST_ENV = cdk.Environment(account="123456789012", region="us-east-1")
 

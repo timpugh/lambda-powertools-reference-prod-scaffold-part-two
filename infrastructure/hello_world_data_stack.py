@@ -30,7 +30,7 @@ from aws_cdk import aws_kms as kms
 from cdk_nag import NagSuppressions
 from constructs import Construct
 
-from hello_world.nag_utils import apply_compliance_aspects
+from infrastructure.nag_utils import apply_compliance_aspects
 
 
 class HelloWorldDataStack(Stack):

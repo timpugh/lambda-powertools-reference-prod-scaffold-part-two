@@ -22,7 +22,7 @@ violate by accident when adding resources:
 Violations are emitted as error-level annotations, so they fail ``cdk synth``
 (the authoritative gate) and are asserted absent by the ``tests/cdk``
 nag-annotation checks — the same surface cdk-nag findings surface on. The
-Aspect is wired for every stack by :func:`hello_world.nag_utils.apply_compliance_aspects`,
+Aspect is wired for every stack by :func:`infrastructure.nag_utils.apply_compliance_aspects`,
 so it runs in lockstep with the rule packs.
 """
 
@@ -70,7 +70,7 @@ class TemplateConventionChecks:
             Annotations.of(node).add_error(
                 f"Log group {node.node.path} has no explicit retention "
                 "(CloudWatch defaults to never-expire). Set retention= on the LogGroup. "
-                "Enforced by hello_world.validation_aspects.TemplateConventionChecks."
+                "Enforced by infrastructure.validation_aspects.TemplateConventionChecks."
             )
 
     @staticmethod
@@ -85,5 +85,5 @@ class TemplateConventionChecks:
                 f"Stateful resource {node.node.path} has no explicit DeletionPolicy/RemovalPolicy. "
                 "Set removal_policy= (DESTROY for the destroy-friendly default, or RETAIN behind "
                 "retain_data for the stateful data stack). "
-                "Enforced by hello_world.validation_aspects.TemplateConventionChecks."
+                "Enforced by infrastructure.validation_aspects.TemplateConventionChecks."
             )
