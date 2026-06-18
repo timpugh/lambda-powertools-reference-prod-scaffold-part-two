@@ -76,10 +76,12 @@ def test_ssm_failure_returns_500(apigw_event, lambda_context, lambda_app_module,
     unexpected exception types intentionally propagate to Powertools' default
     handler so they surface correctly in metrics and X-Ray.
     """
+    from aws_lambda_powertools.utilities.parameters.exceptions import GetParameterError
+
     mocker.patch.object(
         lambda_app_module.ssm_provider,
         "get",
-        side_effect=lambda_app_module.GetParameterError("SSM unavailable"),
+        side_effect=GetParameterError("SSM unavailable"),
     )
 
     ret = lambda_app_module.lambda_handler(apigw_event, lambda_context)
@@ -100,10 +102,12 @@ def test_feature_flag_failure_falls_back_to_default(apigw_event, lambda_context,
     AppConfig integration looks identical to a transient blip — exactly how
     a real misconfiguration stayed hidden until the first live deploy.
     """
+    from aws_lambda_powertools.utilities.feature_flags.exceptions import StoreClientError
+
     mocker.patch.object(
         lambda_app_module.feature_flags,
         "evaluate",
-        side_effect=lambda_app_module.StoreClientError("AppConfig unavailable"),
+        side_effect=StoreClientError("AppConfig unavailable"),
     )
 
     ret = lambda_app_module.lambda_handler(apigw_event, lambda_context)

@@ -13,6 +13,17 @@ import pytest
 # Loading by file path is unambiguous and avoids that collision entirely.
 LAMBDA_APP_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "lambda", "app.py"))
 
+# The handler imports its sibling layers with flat imports (`import models`,
+# `import service`) because the package directory is named `lambda` — a Python
+# keyword — so it can't be imported as a package. At runtime the function root is
+# on sys.path so those resolve; for unit tests we add lambda/ here. (app.py
+# itself is still loaded by absolute file path above, so the root-level CDK
+# app.py can't shadow it; appending — not prepending — means lambda/ is searched
+# only for modules the root doesn't define, so nothing at the root is shadowed.)
+LAMBDA_DIR = os.path.dirname(LAMBDA_APP_PATH)
+if LAMBDA_DIR not in sys.path:
+    sys.path.append(LAMBDA_DIR)
+
 
 @pytest.fixture
 def apigw_event():

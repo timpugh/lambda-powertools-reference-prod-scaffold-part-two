@@ -1,15 +1,21 @@
-"""Serverless App Lambda function using AWS Lambda Powertools.
+"""Serverless App Lambda handler — the handler layer.
 
-This module implements a serverless API endpoint that returns a greeting message.
-It demonstrates the use of Powertools utilities including structured logging,
-X-Ray tracing, CloudWatch metrics, idempotency, SSM parameters, feature flags,
-Pydantic-backed request/response validation (with an OpenAPI spec generated
-at documentation-build time — see scripts/generate_openapi.py), and Event Source
-Data Classes.
+This module initializes the AWS Powertools resolver and the AWS provider clients
+(SSM, AppConfig feature flags, the DynamoDB idempotency layer) with a shared
+retry config, validates the environment at cold start, routes the API Gateway
+event, and translates the service layer's domain errors into HTTP responses. The
+business logic lives in :mod:`service` and the data contracts in :mod:`models`,
+so this file stays focused on wiring and the HTTP boundary.
+
+It demonstrates the Powertools utilities a production handler leans on:
+structured logging, X-Ray tracing, CloudWatch metrics, idempotency, SSM
+parameters, feature flags, Pydantic-backed request/response validation (with an
+OpenAPI spec generated at documentation-build time — see
+scripts/generate_openapi.py), and Event Source Data Classes.
 """
 
 import os
-from typing import Annotated, Any, cast
+from typing import Any, cast
 
 import boto3
 from aws_lambda_powertools import Logger, Metrics, Tracer
@@ -17,14 +23,8 @@ from aws_lambda_powertools.event_handler import APIGatewayRestResolver
 from aws_lambda_powertools.event_handler.api_gateway import CORSConfig
 from aws_lambda_powertools.event_handler.exceptions import InternalServerError
 from aws_lambda_powertools.logging import correlation_paths
-from aws_lambda_powertools.metrics import MetricUnit
 from aws_lambda_powertools.utilities.data_classes import APIGatewayProxyEvent
 from aws_lambda_powertools.utilities.feature_flags import AppConfigStore, FeatureFlags
-from aws_lambda_powertools.utilities.feature_flags.exceptions import (
-    ConfigurationStoreError,
-    SchemaValidationError,
-    StoreClientError,
-)
 from aws_lambda_powertools.utilities.idempotency import (
     DynamoDBPersistenceLayer,
     idempotent,
@@ -32,35 +32,10 @@ from aws_lambda_powertools.utilities.idempotency import (
 from aws_lambda_powertools.utilities.idempotency.config import IdempotencyConfig
 from aws_lambda_powertools.utilities.idempotency.exceptions import IdempotencyKeyError
 from aws_lambda_powertools.utilities.parameters import SSMProvider
-from aws_lambda_powertools.utilities.parameters.exceptions import GetParameterError
 from aws_lambda_powertools.utilities.typing import LambdaContext
 from botocore.config import Config
-from pydantic import BaseModel, Field, PositiveInt
-
-
-class EnvVars(BaseModel):
-    """Typed view of the environment variables this handler requires.
-
-    Validated once at module load (below). A missing or malformed env var
-    (table name, profile name, a non-numeric cache age) would otherwise only
-    surface deep inside boto3 as an opaque parameter-validation error; failing
-    at import time with pydantic's field-by-field report makes the
-    misconfiguration obvious in CloudWatch on the very first invocation.
-    Validation is stricter than a presence check: empty strings are rejected
-    and the cache age must parse as a positive integer.
-    """
-
-    IDEMPOTENCY_TABLE_NAME: Annotated[str, Field(min_length=1)]
-    GREETING_PARAM_NAME: Annotated[str, Field(min_length=1)]
-    APPCONFIG_APP_NAME: Annotated[str, Field(min_length=1)]
-    APPCONFIG_ENV_NAME: Annotated[str, Field(min_length=1)]
-    APPCONFIG_PROFILE_NAME: Annotated[str, Field(min_length=1)]
-    # In-memory TTL for the fetched feature-flag configuration. Defaults to the
-    # same 300s the SSM read uses (see ssm_provider.get below) so the two
-    # config-fetch paths share one caching posture; override per environment
-    # via the Lambda environment block in CDK when flags must propagate faster.
-    APPCONFIG_MAX_AGE_SECONDS: PositiveInt = 300
-
+from models import EnvVars, GreetingResponse, InternalErrorResponse, MissingIdempotencyKeyResponse
+from service import GreetingUnavailableError, build_greeting
 
 # Module-level so a bad deployment fails the cold start, not the Nth request.
 # Extra keys in os.environ are ignored by pydantic's default model config.
@@ -144,7 +119,7 @@ idempotency_config = IdempotencyConfig(
 # so an explicit client is the clean way to apply the retry policy here.
 # max_age lifts the fetched-configuration TTL from the Powertools default of
 # 5 seconds — which would re-poll the AppConfig data plane every 5s per warm
-# container — to the same 300s posture as the SSM read below. Tunable per
+# container — to the same 300s posture as the SSM read in service.py. Tunable per
 # environment via APPCONFIG_MAX_AGE_SECONDS.
 app_config_store = AppConfigStore(
     environment=_ENV.APPCONFIG_ENV_NAME,
@@ -163,45 +138,8 @@ feature_flags = FeatureFlags(store=app_config_store)
 ssm_provider = SSMProvider(boto_config=boto_config)
 
 # Greeting parameter name resolved at module load — validated as non-empty by
-# the EnvVars model above rather than letting boto3 reject an empty key at runtime.
+# the EnvVars model rather than letting boto3 reject an empty key at runtime.
 GREETING_PARAM_NAME = _ENV.GREETING_PARAM_NAME
-
-
-class GreetingResponse(BaseModel):
-    """Response body for GET /greeting."""
-
-    message: str = Field(
-        ...,
-        description="Greeting from SSM Parameter Store, optionally suffixed when the enhanced_greeting flag is on.",
-        examples=["hello world", "hello world - enhanced mode enabled"],
-    )
-
-
-class MissingIdempotencyKeyResponse(BaseModel):
-    """Body of the 400 returned when the required Idempotency-Key header is absent.
-
-    Shape must match the hand-built response in ``lambda_handler`` — that 400 is
-    constructed outside the Powertools resolver (the idempotency layer rejects
-    the request before the resolver runs), so this model exists purely to
-    document the contract in the generated OpenAPI spec.
-    """
-
-    message: str = Field(
-        "Idempotency-Key header is required",
-        description="Explanation of the rejected request.",
-    )
-
-
-class InternalErrorResponse(BaseModel):
-    """Body of the 500 produced by Powertools' ServiceError handling.
-
-    When ``get_greeting`` raises ``InternalServerError`` (e.g. the SSM read fails),
-    the resolver serialises it as ``{"statusCode": 500, "message": ...}`` —
-    documented here so spec consumers see the failure shape, not just the 200.
-    """
-
-    statusCode: int = Field(500, description="HTTP status code echoed in the body.")  # noqa: N815 — matches the wire format
-    message: str = Field(..., description="Error description.", examples=["Failed to fetch greeting"])
 
 
 @app.get(
@@ -239,15 +177,13 @@ class InternalErrorResponse(BaseModel):
 def get_greeting() -> GreetingResponse:
     """Handle GET /greeting requests.
 
-    Fetches the greeting from SSM Parameter Store, checks the enhanced_greeting
-    feature flag, emits a CloudWatch metric, and logs request metadata from
-    the API Gateway event.
+    Extracts request metadata from the typed API Gateway event, delegates the
+    business logic to :func:`service.build_greeting`, and maps a service-layer
+    :class:`service.GreetingUnavailableError` to an HTTP 500.
 
     Returns:
         GreetingResponse: Validated response model with a ``message`` field.
     """
-    metrics.add_metric(name="GreetingRequests", unit=MetricUnit.Count, value=1)
-
     # Access typed event data via Event Source Data Classes
     event: APIGatewayProxyEvent = app.current_event
     source_ip = event.request_context.identity.source_ip
@@ -261,61 +197,19 @@ def get_greeting() -> GreetingResponse:
         request_id=request_id,
     )
 
-    # Fetch greeting from SSM Parameter Store. Powertools wraps boto3 errors
-    # (ClientError, BotoCoreError) as GetParameterError; catch only that so
-    # truly unexpected exceptions propagate to Powertools' default handler
-    # and surface with the right type in metrics and X-Ray.
-    # max_age=300 raises Powertools' in-memory TTL from its 5-second default
-    # so warm containers reuse the value for 5 minutes between SSM calls.
-    # The greeting changes via deployment, not at runtime, so a longer TTL
-    # is safe and meaningfully reduces SSM API spend at higher RPS.
+    # Pass source_ip + user_agent as flag-evaluation context so AppConfig rules
+    # can match on them (the route's description promises IP-based gating). A
+    # GetParameterError on the SSM read surfaces from the service as a domain
+    # GreetingUnavailableError; map it to the 500 the OpenAPI spec documents.
     try:
-        # SSMProvider.get returns str | bytes | dict | None to cover transform/
-        # binary cases; this is a plain String parameter with no transform, so it
-        # is always str at runtime. cast keeps the downstream message typed as str.
-        greeting = cast("str", ssm_provider.get(GREETING_PARAM_NAME, max_age=300))
-    except GetParameterError as exc:
-        logger.exception("Failed to fetch greeting from SSM", param_name=GREETING_PARAM_NAME)
-        raise InternalServerError("Failed to fetch greeting") from exc
-    logger.info("Greeting fetched from parameter store", greeting=greeting)
-
-    # Check feature flag — non-critical, fall back to default on failure.
-    # Pass source_ip + user_agent as context so AppConfig rules can match on
-    # them (the route's docstring promises IP-based gating; without context
-    # the rule engine can never see the values to evaluate against).
-    # Catch only the Powertools FeatureFlags exception types — programming
-    # errors (TypeError, AttributeError) intentionally propagate so they
-    # surface as bugs in metrics rather than being silently absorbed by the
-    # fallback path.
-    try:
-        enhanced = feature_flags.evaluate(
-            name="enhanced_greeting",
-            context={"source_ip": source_ip, "user_agent": user_agent},
-            default=False,
+        message = build_greeting(
+            ssm_provider=ssm_provider,
+            feature_flags=feature_flags,
+            param_name=GREETING_PARAM_NAME,
+            flag_context={"source_ip": source_ip, "user_agent": user_agent},
         )
-    except (ConfigurationStoreError, SchemaValidationError, StoreClientError):
-        # exc_info=True puts the underlying exception in the log record —
-        # without it a permanently broken AppConfig integration (bad IAM, bad
-        # config, KMS denial) is indistinguishable in CloudWatch from a
-        # transient network blip, and the cause is unrecoverable after the
-        # fact. Kept at WARNING because the request still succeeds.
-        logger.warning("Feature flag evaluation failed, falling back to default", exc_info=True)
-        # Emit a metric on the fallback so a bad flag *config* is observable.
-        # A bad config is caught here and degraded gracefully (the request still
-        # returns 200), so it produces no Lambda error or 5xx — this metric is
-        # the only signal that the config is broken. It's the signal a production
-        # fork wires an AppConfig deployment monitor to (gradual rollout +
-        # auto-rollback — a documented add-on, not shipped; see the AppConfig
-        # deployment comment in infrastructure/backend_app.py). Lands in the
-        # ServerlessApp namespace with the service dimension Powertools adds.
-        metrics.add_metric(name="FeatureFlagEvaluationFailure", unit=MetricUnit.Count, value=1)
-        enhanced = False
-
-    if enhanced:
-        message = f"{greeting} - enhanced mode enabled"
-        logger.info("Enhanced greeting enabled")
-    else:
-        message = greeting
+    except GreetingUnavailableError as exc:
+        raise InternalServerError("Failed to fetch greeting") from exc
 
     return GreetingResponse(message=message)
 
@@ -338,8 +232,8 @@ def _resolve_with_idempotency(event: dict[str, Any], context: LambdaContext) -> 
     replayed. This is acceptable for this single-GET reference (the documented
     contract is one key per logical request — see README "Idempotency keys"); a
     fork that wants transient errors retried under the same key should move
-    idempotency onto ``get_greeting`` (the success-bearing function) instead of the
-    resolver — Powertools supports this directly via
+    idempotency onto ``service.build_greeting`` (the success-bearing function) instead
+    of the resolver — Powertools supports this directly via
     ``@idempotent_function(data_keyword_argument=..., ...)`` with a
     ``PydanticSerializer`` output serializer, so the cached record stores the
     validated response model rather than a raw dict — accepting that the
