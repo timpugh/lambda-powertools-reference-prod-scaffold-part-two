@@ -46,7 +46,7 @@ This application provisions Lambda, API Gateway, DynamoDB, SSM Parameter Store, 
 - [Quality and security](#quality-and-security) — [Tests](#tests) · [Linting and static analysis](#linting-and-static-analysis) · [Detecting deprecated APIs](#detecting-deprecated-apis) · [Pre-commit hooks](#pre-commit-hooks) · [Security](#security) · [CDK security checks](#cdk-security-checks) · [pyproject.toml configuration](#pyprojecttoml-configuration)
 - [CI/CD](#cicd) — [GitHub Actions](#github-actions)
 - [Project dependencies](#project-dependencies)
-- [When forking for production](#when-forking-for-production) — [Design decisions](#design-decisions-and-known-limitations) · [Scaling](#scaling-beyond-a-reference-architecture) · [AWS ops services](#aws-services-for-post-deployment-operations)
+- [When forking for production](#when-forking-for-production) — [Tailoring to your workload](#tailoring-this-to-your-workload) · [Design decisions](#design-decisions-and-known-limitations) · [Scaling](#scaling-beyond-a-reference-architecture) · [AWS ops services](#aws-services-for-post-deployment-operations)
 - [Resources](#resources)
 
 ## Getting started
@@ -1669,6 +1669,23 @@ make upgrade COOLDOWN_DAYS=0             # disable cooldown
 | `requests` | HTTP client, used by integration tests to call the live API Gateway endpoint |
 
 ## When forking for production
+
+### Tailoring this to your workload
+
+This template ships **one** opinionated, maximal baseline — a static SPA on CloudFront plus its own API, with full security and observability wired in. It isn't a menu you pick from; it's a starting point you **prune to your scope, then harden** — two operations, in that order.
+
+**1. Subtract what your workload doesn't have.** The stacks are deliberately separable, so removing a capability is mostly deleting a stack and its wiring in [`app_stage.py`](infrastructure/app_stage.py):
+
+- **API-only (no frontend):** drop `FrontendStack` (S3 + CloudFront + RUM + Cognito + the Athena/Glue access-log tables), `WafStack` (the CloudFront-scoped WebACL — only CloudFront consumes it), and `AuditStack` (it exists solely to audit the frontend's buckets); keep `DataStack` + `BackendStack`. The API keeps its protection — the **regional** WAF lives inside `BackendApp`, not in `WafStack`, so it stays. In `AppStage` you also remove the now-orphaned cross-refs: the `waf_acl_arn`, the `audited_buckets` import, and the WAF-log-location strings that were fed to the frontend.
+- **No object-level audit needed?** Removing the Trail is a clean deletion of `AuditStack` (see [Audit stack and log retention](#audit-stack-and-log-retention)) — the most expensive line in the [cost overview](#cost-overview).
+- **One compliance framework, not five?** `apply_compliance_aspects` in [`nag_utils.py`](infrastructure/nag_utils.py) runs AwsSolutions + Serverless + NIST + HIPAA + PCI together to *demonstrate* the pattern; keep the one you're actually audited against and drop the rest (which sheds their suppressions too).
+- **Cut topology cost:** fold the data/audit stacks back into compute for a small single-service fork (a documented, valid simplification — see [Design decisions](#design-decisions-and-known-limitations)), or share one `WafStack` across long-lived environments rather than one per deployment ([cost overview](#cost-overview)).
+
+**2. Then add what production needs.** Once it's stripped to your shape, work the **Production readiness checklist in [`TODO.md`](TODO.md)** — the central add-list. The headline items deliberately left unshipped: **authentication/authorization** on the API (Cognito/JWT authorizer), restricting **CORS** from `*` to your real origin, an **AWS Backup** plan plus `-c retain_data=true` ([retain_data](#stateful-data-stack-and-retain_data)), and a **custom domain + ACM certificate**. Per-item rationale lives in [Scaling beyond a reference architecture](#scaling-beyond-a-reference-architecture).
+
+**The two SPA+API shapes are subtract vs. add.** As shipped, the browser calls the API directly (cross-origin — which is *why* CORS is open). The stronger production shape puts the API *behind the same CloudFront distribution* as a second behavior (same-origin, no CORS, a single WAF surface) — but that's an **add**, not a prune: it needs the origin lockdown (a CloudFront-injected secret header + an API Gateway resource policy), tracked as the open "CloudFront-bypass" item in `TODO.md`. Without that lockdown the direct `execute-api` URL stays reachable, which is exactly why the template ships the regional WAF as the as-is API protection.
+
+Rule of thumb: **subtraction is mostly mechanical (delete a stack + its wiring); the hardening is where the real per-workload decisions live.**
 
 ### Design decisions and known limitations
 
