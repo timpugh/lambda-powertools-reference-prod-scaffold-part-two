@@ -273,6 +273,91 @@ def test_env_model_appconfig_max_age_default_and_wiring(lambda_app_module):
     assert lambda_app_module.app_config_store.cache_seconds == 300
 
 
+def test_resolve_tenant_id_defaults_to_anonymous(apigw_event, lambda_app_module):
+    """With no authorizer on the request, tenant context resolves to "anonymous".
+
+    There is no authentication in this reference, so every request today takes
+    this fallback path — it is the value that flows into logs, metrics, and the
+    trace. Pinning it guards the default a fork relies on until it wires auth.
+    """
+    from aws_lambda_powertools.utilities.data_classes import APIGatewayProxyEvent
+
+    event = APIGatewayProxyEvent(apigw_event)
+
+    assert lambda_app_module._resolve_tenant_id(event) == "anonymous"
+
+
+def test_resolve_tenant_id_reads_authorizer_claim(apigw_event, lambda_app_module):
+    """A ``tenantId`` claim on the API Gateway authorizer context wins over the default.
+
+    This is the forward-compatible path: when a fork adds a Cognito/JWT or custom
+    Lambda authorizer, the tenant claim lands in ``requestContext.authorizer`` and
+    every telemetry signal is already dimensioned by it — no retrofit needed.
+    Sourcing from the authorizer (set server-side) rather than a client header is
+    deliberate: a client-controlled value could be spoofed to read another
+    tenant's telemetry.
+    """
+    from aws_lambda_powertools.utilities.data_classes import APIGatewayProxyEvent
+
+    apigw_event["requestContext"]["authorizer"] = {"tenantId": "acme-corp"}
+    event = APIGatewayProxyEvent(apigw_event)
+
+    assert lambda_app_module._resolve_tenant_id(event) == "acme-corp"
+
+
+def test_tenant_id_tags_structured_logs(apigw_event, lambda_context, lambda_app_module):
+    """The resolved tenant_id appears on the structured log records of the request.
+
+    This is the payoff a junior dev cares about: being able to ``filter
+    tenant_id = ...`` in Logs Insights. Captures the Powertools logger's own
+    stdout stream (per-test capsys never sees it — see tests/unit/conftest notes)
+    and asserts the JSON log line carries the field.
+    """
+    import io
+
+    logger = lambda_app_module.logger
+    buf = io.StringIO()
+    swapped = [h for h in logger.handlers if hasattr(h, "stream")]
+    originals = [h.stream for h in swapped]
+    for handler in swapped:
+        handler.stream = buf
+    try:
+        lambda_app_module.lambda_handler(apigw_event, lambda_context)
+    finally:
+        for handler, original in zip(swapped, originals, strict=True):
+            handler.stream = original
+
+    assert '"tenant_id":"anonymous"' in buf.getvalue()
+
+
+def test_tenant_id_added_as_metric_dimension(apigw_event, lambda_context, lambda_app_module, mocker):
+    """tenant_id is added as a CloudWatch metric dimension for the invocation.
+
+    The shared Powertools metric store means the service-layer metrics
+    (GreetingRequests, FeatureFlagEvaluationFailure) inherit the dimension too,
+    so they can be charted per tenant. A refactor dropping the dimension would
+    otherwise pass every other test.
+    """
+    spy = mocker.patch.object(lambda_app_module.metrics, "add_dimension")
+
+    lambda_app_module.lambda_handler(apigw_event, lambda_context)
+
+    spy.assert_any_call(name="tenant_id", value="anonymous")
+
+
+def test_tenant_id_added_as_trace_annotation(apigw_event, lambda_context, lambda_app_module, mocker):
+    """tenant_id is added as a filterable X-Ray annotation for the invocation.
+
+    Annotations (not metadata) are the indexed, queryable kind — so the X-Ray
+    console can filter the browser→API Gateway→Lambda trace down to one tenant.
+    """
+    spy = mocker.patch.object(lambda_app_module.tracer, "put_annotation")
+
+    lambda_app_module.lambda_handler(apigw_event, lambda_context)
+
+    spy.assert_any_call(key="tenant_id", value="anonymous")
+
+
 def test_persistence_layer_error_propagates(apigw_event, lambda_context, lambda_app_module, monkeypatch, mocker):
     """A DynamoDB-side persistence failure does not get masked as a 400.
 

@@ -142,6 +142,27 @@ ssm_provider = SSMProvider(boto_config=boto_config)
 GREETING_PARAM_NAME = _ENV.GREETING_PARAM_NAME
 
 
+def _resolve_tenant_id(event: APIGatewayProxyEvent) -> str:
+    """Resolve the tenant identifier for the current request.
+
+    This is the single place tenant context enters the application. There is no
+    authentication in this reference today, so there is no real tenant: the
+    function reads an optional ``tenantId`` claim from the API Gateway authorizer
+    context and falls back to ``"anonymous"`` — the value every request actually
+    hits right now. It exists so that logs, metrics, and traces are dimensioned
+    by tenant from day one (see ``get_greeting``), rather than needing a retrofit
+    across every dashboard and saved query the day multi-tenancy arrives.
+
+    When a fork adds authentication (a Cognito/JWT authorizer or a custom Lambda
+    authorizer), the tenant claim lands in ``requestContext.authorizer`` and this
+    function starts returning real values. Derive tenant from the *authenticated*
+    identity, never from a client-supplied header — a header the caller controls
+    can be spoofed to read another tenant's telemetry.
+    """
+    tenant_id = event.request_context.authorizer.get("tenantId")
+    return str(tenant_id) if tenant_id else "anonymous"
+
+
 @app.get(
     "/greeting",
     summary="Return a greeting",
@@ -189,6 +210,23 @@ def get_greeting() -> GreetingResponse:
     source_ip = event.request_context.identity.source_ip
     user_agent = event.request_context.identity.user_agent
     request_id = event.request_context.request_id
+
+    # Tenant context as a first-class observability dimension. Today there is no
+    # auth, so this is always "anonymous" (see _resolve_tenant_id); the value
+    # goes live the day a fork puts a tenant claim on the request. Tagging all
+    # three signals here means logs, EMF metrics, and the X-Ray trace can be
+    # sliced per tenant without a retrofit. Powertools propagates appended log
+    # keys across Logger instances of the same service, and shares one metric
+    # store, so the service layer's records and metrics inherit tenant_id too —
+    # no need to thread it through build_greeting.
+    # Cardinality caveat: a tenant_id metric *dimension* creates one metric
+    # stream per distinct value — harmless at "anonymous"/low tenant counts, but
+    # size it (or drop the dimension) before turning this loose on thousands of
+    # tenants, since each unique value is a separately billed custom metric.
+    tenant_id = _resolve_tenant_id(event)
+    logger.append_keys(tenant_id=tenant_id)
+    tracer.put_annotation(key="tenant_id", value=tenant_id)
+    metrics.add_dimension(name="tenant_id", value=tenant_id)
 
     logger.info(
         "Request received",
