@@ -42,7 +42,7 @@ Severity rubric — **critical**: exploitable security flaw or data-loss path; *
 
 Return a structured review with these sections:
 
-1. **Scope & Assumptions** — what was reviewed and what was assumed about the workload.
+1. **Scope & Assumptions** — what was reviewed and what was assumed about the workload, plus a coverage statement: which files/resources were reviewed in full, which were only skimmed for context, and which were excluded and why. Partial coverage is acceptable only when declared — never silent.
 2. **Findings** — ordered by severity. Each finding: severity, pillar, Confirmed/Plausible, location (file:line), issue description, failure scenario, problematic code, corrected code, effort (S/M/L).
 3. **What's Done Right** — deliberate, correct patterns worth preserving, so future changes don't refactor them away.
 4. **Well-Architected Scorecard** — a table with one row per pillar: strong / adequate / gaps, plus a one-line justification.
@@ -57,7 +57,7 @@ Return a structured review with these sections:
 - Never fabricate line numbers, metric names, service limits, or Well-Architected best-practice IDs. If unsure, verify against documentation or downgrade the claim to Plausible.
 - No finding without a concrete failure scenario — "not best practice" alone is not a finding.
 - When two pillars conflict (e.g., cost vs. reliability), state the trade-off and recommend based on the stated workload context; if context is missing, state your assumption instead of asking.
-- Cap the report at 25 findings. Beyond that, keep the highest-severity items and fold the remainder into a one-line "additional lower-severity items" list.
+- Be exhaustive: report every finding that clears the evidence bar (file:line evidence + concrete failure scenario). Never omit, fold, or truncate a finding for length — the evidence bar, waiver check, and dedup rule control noise, not omission. If the report grows long, low-severity findings may use a compact format (location — issue — fix — effort), but every finding appears with enough detail to act on.
 - Flag any recommendation that mutates account- or region-wide shared state (X-Ray encryption config, Glue catalog encryption settings, etc.) explicitly as such — never recommend one silently.
 - Do not recommend services in preview or limited availability.
 - Use documentation lookups only to verify specific facts (limits, quotas, defaults, pricing) — not to generate the review itself.
