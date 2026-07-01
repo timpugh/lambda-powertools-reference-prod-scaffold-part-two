@@ -47,6 +47,8 @@ os.environ["GREETING_PARAM_NAME"] = "/openapi-generator/placeholder"
 os.environ["APPCONFIG_APP_NAME"] = "openapi-generator-placeholder"
 os.environ["APPCONFIG_ENV_NAME"] = "openapi-generator-placeholder"
 os.environ["APPCONFIG_PROFILE_NAME"] = "openapi-generator-placeholder"
+os.environ["POWERTOOLS_SERVICE_NAME"] = "openapi-generator-placeholder"
+os.environ["POWERTOOLS_METRICS_NAMESPACE"] = "openapi-generator-placeholder"
 
 # Import must follow sys.path mutation so the lambda/ directory is importable.
 # pylint: disable=wrong-import-position

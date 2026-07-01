@@ -30,11 +30,20 @@ from aws_lambda_powertools.utilities.idempotency import (
     idempotent,
 )
 from aws_lambda_powertools.utilities.idempotency.config import IdempotencyConfig
-from aws_lambda_powertools.utilities.idempotency.exceptions import IdempotencyKeyError
+from aws_lambda_powertools.utilities.idempotency.exceptions import (
+    IdempotencyAlreadyInProgressError,
+    IdempotencyKeyError,
+)
 from aws_lambda_powertools.utilities.parameters import SSMProvider
 from aws_lambda_powertools.utilities.typing import LambdaContext
 from botocore.config import Config
-from models import EnvVars, GreetingResponse, InternalErrorResponse, MissingIdempotencyKeyResponse
+from models import (
+    EnvVars,
+    GreetingResponse,
+    IdempotencyInProgressResponse,
+    InternalErrorResponse,
+    MissingIdempotencyKeyResponse,
+)
 from service import GreetingUnavailableError, build_greeting
 
 # Module-level so a bad deployment fails the cold start, not the Nth request.
@@ -63,7 +72,18 @@ metrics = Metrics()
 # client-supplied Idempotency-Key, and the SSM/AppConfig calls are reads. This
 # implements the AWS "retry with backoff" prescriptive-guidance pattern without
 # hand-rolling a retry loop — see README "Patterns deliberately not used".
-boto_config = Config(retries={"mode": "adaptive", "max_attempts": 4})
+# connect/read timeouts bound each ATTEMPT: the retry budget above only helps
+# against fast-fail errors — botocore's defaults are 60s connect + 60s read,
+# six times the function's own 10s timeout, so a single hung connection would
+# otherwise consume the whole invocation (502 to the caller) before the first
+# retry ever fired. Bounding the attempt turns a hang into a fast, retryable
+# error; 1s/2s is generous for the small same-region SSM/AppConfig/DynamoDB
+# calls this handler makes.
+boto_config = Config(
+    retries={"mode": "adaptive", "max_attempts": 4},
+    connect_timeout=1,
+    read_timeout=2,
+)
 
 # enable_validation=True wires Pydantic into the resolver. Request bodies and
 # response return types are validated against their model annotations, and
@@ -159,7 +179,13 @@ def _resolve_tenant_id(event: APIGatewayProxyEvent) -> str:
     identity, never from a client-supplied header — a header the caller controls
     can be spoofed to read another tenant's telemetry.
     """
-    tenant_id = event.request_context.authorizer.get("tenantId")
+    # Both authorizer shapes are handled: a custom Lambda authorizer's context
+    # keys land directly on the authorizer object, while a Cognito user-pool
+    # authorizer nests its JWT claims one level deeper under "claims" — reading
+    # only the flat shape would silently keep resolving "anonymous" for
+    # authenticated Cognito users.
+    authorizer = event.request_context.authorizer
+    tenant_id = authorizer.get("tenantId") or (authorizer.get("claims") or {}).get("tenantId")
     return str(tenant_id) if tenant_id else "anonymous"
 
 
@@ -187,6 +213,10 @@ def _resolve_tenant_id(event: APIGatewayProxyEvent) -> str:
         400: {
             "description": "Missing Idempotency-Key header.",
             "content": {"application/json": {"model": MissingIdempotencyKeyResponse}},
+        },
+        409: {
+            "description": "A request with the same Idempotency-Key is still in progress.",
+            "content": {"application/json": {"model": IdempotencyInProgressResponse}},
         },
         500: {
             "description": "Greeting could not be fetched from SSM Parameter Store.",
@@ -285,7 +315,13 @@ def _resolve_with_idempotency(event: dict[str, Any], context: LambdaContext) -> 
 # joined in Logs Insights without relying on the single line that logs
 # request_id by hand. capture_response=False keeps response payloads out of
 # X-Ray segments — traces record timing and metadata, not body content.
-@logger.inject_lambda_context(correlation_id_path=correlation_paths.API_GATEWAY_REST)
+# clear_state=True wipes append_keys state at the start of each invocation:
+# tenant_id is appended only once routing succeeds, so without it a request
+# rejected *before* the route runs (400/404/422) on a warm container would log
+# the previous request's tenant_id — misattributing one tenant's malformed
+# traffic to another in per-tenant Logs Insights queries. Keys appended during
+# an invocation still propagate to the service layer for that request.
+@logger.inject_lambda_context(correlation_id_path=correlation_paths.API_GATEWAY_REST, clear_state=True)
 @tracer.capture_lambda_handler(capture_response=False)
 @metrics.log_metrics(capture_cold_start_metric=True)
 def lambda_handler(event: dict[str, Any], context: LambdaContext) -> dict[str, Any]:
@@ -293,8 +329,12 @@ def lambda_handler(event: dict[str, Any], context: LambdaContext) -> dict[str, A
 
     Resolves the API Gateway event through the router and returns the result.
     Decorated with Powertools Logger, Tracer, Metrics; the inner function
-    handles Idempotency so a missing Idempotency-Key header surfaces as a 400
-    instead of an unhandled 500.
+    handles Idempotency so the idempotency layer's caller-caused rejections map
+    to meaningful HTTP responses — a missing Idempotency-Key header to a 400, a
+    duplicate request whose original is still executing to a 409 — instead of
+    unhandled 5xx errors. Infrastructure faults (e.g. the persistence layer's
+    DynamoDB errors) deliberately propagate so they surface in the Errors
+    metric and X-Ray rather than being flattened into a client-error shape.
 
     Args:
         event: API Gateway Lambda proxy event.
@@ -330,5 +370,24 @@ def lambda_handler(event: dict[str, Any], context: LambdaContext) -> dict[str, A
                 "Access-Control-Allow-Origin": "*",
             },
             "body": '{"message":"Idempotency-Key header is required"}',
+            "isBase64Encoded": False,
+        }
+    except IdempotencyAlreadyInProgressError:
+        # Raised when the same Idempotency-Key arrives while the first
+        # execution's record is still INPROGRESS — ordinary client behavior
+        # (double-click, timeout-retry during a cold start), not a fault.
+        # Uncaught it would become an API Gateway 502 with no CORS header and
+        # off the OpenAPI contract, and each occurrence would feed the canary
+        # alias-errors rollback alarm.
+        logger.warning("Request rejected: duplicate request while the original is still in progress")
+        return {
+            "statusCode": 409,
+            # Built outside the resolver — carries its own CORS header, same
+            # rule as the 400 above. Keep in sync with CORSConfig.allow_origin.
+            "headers": {
+                "Content-Type": "application/json",
+                "Access-Control-Allow-Origin": "*",
+            },
+            "body": '{"message":"A request with this Idempotency-Key is still in progress; retry shortly"}',
             "isBase64Encoded": False,
         }

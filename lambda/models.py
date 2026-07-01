@@ -31,6 +31,14 @@ class EnvVars(BaseModel):
     APPCONFIG_APP_NAME: Annotated[str, Field(min_length=1)]
     APPCONFIG_ENV_NAME: Annotated[str, Field(min_length=1)]
     APPCONFIG_PROFILE_NAME: Annotated[str, Field(min_length=1)]
+    # Read by Powertools rather than handler code, but validated here all the
+    # same: dropping the metrics namespace from the CDK environment block
+    # deploys fine and then fails EVERY request at metrics-flush time — after
+    # the business logic has already run — which is exactly the deep, late
+    # failure this import-time gate exists to prevent. Powertools still reads
+    # the environment directly; these fields only assert presence and shape.
+    POWERTOOLS_SERVICE_NAME: Annotated[str, Field(min_length=1)]
+    POWERTOOLS_METRICS_NAMESPACE: Annotated[str, Field(min_length=1)]
     # In-memory TTL for the fetched feature-flag configuration. Defaults to the
     # same 300s the SSM read uses (see ssm_provider.get in service.py) so the two
     # config-fetch paths share one caching posture; override per environment
@@ -60,6 +68,23 @@ class MissingIdempotencyKeyResponse(BaseModel):
     message: str = Field(
         "Idempotency-Key header is required",
         description="Explanation of the rejected request.",
+    )
+
+
+class IdempotencyInProgressResponse(BaseModel):
+    """Body of the 409 returned while an identical request is still executing.
+
+    Powertools raises ``IdempotencyAlreadyInProgressError`` when a request
+    arrives with the same Idempotency-Key before the first execution has
+    completed (double-click, client timeout-retry). Like the 400 above, the
+    response is constructed by hand in ``lambda_handler`` outside the resolver,
+    so this model exists purely to document the contract in the generated
+    OpenAPI spec — its shape must match the hand-built response.
+    """
+
+    message: str = Field(
+        "A request with this Idempotency-Key is still in progress; retry shortly",
+        description="Explanation of the conflict.",
     )
 
 

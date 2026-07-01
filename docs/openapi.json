@@ -51,6 +51,16 @@
               }
             }
           },
+          "409": {
+            "description": "A request with the same Idempotency-Key is still in progress.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdempotencyInProgressResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Greeting could not be fetched from SSM Parameter Store.",
             "content": {
@@ -104,6 +114,19 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "IdempotencyInProgressResponse": {
+        "properties": {
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "Explanation of the conflict.",
+            "default": "A request with this Idempotency-Key is still in progress; retry shortly"
+          }
+        },
+        "type": "object",
+        "title": "IdempotencyInProgressResponse",
+        "description": "Body of the 409 returned while an identical request is still executing.\n\nPowertools raises ``IdempotencyAlreadyInProgressError`` when a request\narrives with the same Idempotency-Key before the first execution has\ncompleted (double-click, client timeout-retry). Like the 400 above, the\nresponse is constructed by hand in ``lambda_handler`` outside the resolver,\nso this model exists purely to document the contract in the generated\nOpenAPI spec \u2014 its shape must match the hand-built response."
       },
       "InternalErrorResponse": {
         "properties": {

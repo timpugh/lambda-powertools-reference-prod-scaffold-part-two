@@ -361,12 +361,14 @@ def test_tenant_id_added_as_trace_annotation(apigw_event, lambda_context, lambda
 def test_persistence_layer_error_propagates(apigw_event, lambda_context, lambda_app_module, monkeypatch, mocker):
     """A DynamoDB-side persistence failure does not get masked as a 400.
 
-    The outer handler intentionally only catches ``IdempotencyKeyError``
-    (which has a meaningful 400 mapping); persistence-layer failures
-    propagate up to the Lambda runtime instead, so the original exception
-    type surfaces in CloudWatch metrics and X-Ray rather than being silently
-    flattened into the generic 400 path. We assert the exception escapes
-    rather than being absorbed.
+    The outer handler intentionally catches only the idempotency exceptions
+    with meaningful HTTP mappings (``IdempotencyKeyError`` → 400,
+    ``IdempotencyAlreadyInProgressError`` → 409 — both caused by the caller);
+    persistence-layer failures are infrastructure faults and propagate up to
+    the Lambda runtime instead, so the original exception type surfaces in
+    CloudWatch metrics and X-Ray rather than being silently flattened into a
+    client-error path. We assert the exception escapes rather than being
+    absorbed.
     """
     from aws_lambda_powertools.utilities.idempotency.exceptions import IdempotencyPersistenceLayerError
 
@@ -383,3 +385,138 @@ def test_persistence_layer_error_propagates(apigw_event, lambda_context, lambda_
 
     with pytest.raises(IdempotencyPersistenceLayerError):
         lambda_app_module.lambda_handler(apigw_event, lambda_context)
+
+
+def test_duplicate_request_in_progress_returns_409(apigw_event, lambda_context, lambda_app_module, monkeypatch, mocker):
+    """A duplicate request while the original is still executing returns 409, not 502.
+
+    When a request arrives with the same Idempotency-Key while the first
+    execution's record is still INPROGRESS (double-click, client timeout-retry
+    during a cold start), Powertools raises IdempotencyAlreadyInProgressError.
+    Uncaught, that propagates as an unhandled Lambda error → API Gateway 502
+    with no CORS header (unreadable to browsers) and off the OpenAPI contract —
+    and each occurrence feeds the canary alias-errors rollback alarm. The
+    handler must map it to a documented 409 instead. The mocks reproduce the
+    real Powertools path: the conditional put fails with the existing INPROGRESS
+    record attached, exactly what DynamoDB's ReturnValuesOnConditionCheckFailure
+    yields on a live table.
+    """
+    from aws_lambda_powertools.utilities.idempotency.exceptions import IdempotencyItemAlreadyExistsError
+    from aws_lambda_powertools.utilities.idempotency.persistence.datarecord import DataRecord
+
+    monkeypatch.delenv("POWERTOOLS_IDEMPOTENCY_DISABLED", raising=False)
+    mocker.patch(
+        "aws_lambda_powertools.utilities.idempotency.base.IdempotencyHandler._get_remaining_time_in_millis",
+        return_value=30_000,
+    )
+    in_progress_record = DataRecord(idempotency_key="test-idempotency-key-default", status="INPROGRESS")
+    mocker.patch.object(
+        lambda_app_module.persistence_layer,
+        "_put_record",
+        side_effect=IdempotencyItemAlreadyExistsError(old_data_record=in_progress_record),
+    )
+
+    ret = lambda_app_module.lambda_handler(apigw_event, lambda_context)
+
+    assert ret["statusCode"] == 409
+    assert "Idempotency-Key" in ret["body"]
+    assert "in progress" in ret["body"]
+    # Built outside the Powertools resolver, so it must carry its own CORS
+    # header — same contract as the 400. Keep in sync with CORSConfig.
+    assert ret["headers"]["Access-Control-Allow-Origin"] == "*"
+
+
+def test_sdk_socket_timeouts_bounded(lambda_app_module):
+    """The shared boto_config bounds connect/read timeouts on every SDK client.
+
+    botocore's defaults are 60s connect + 60s read — six times the function's
+    own 10s timeout — so a single hung connection to SSM, AppConfig, or
+    DynamoDB would consume the entire invocation budget before the adaptive
+    retry policy ever fires. Explicit per-attempt bounds convert a hang into a
+    fast, retryable error. Asserting on the live clients (not just the config
+    object) catches a refactor that drops boto_config= from a constructor.
+    """
+    assert lambda_app_module.boto_config.connect_timeout == 1
+    assert lambda_app_module.boto_config.read_timeout == 2
+    assert lambda_app_module.ssm_provider.client.meta.config.connect_timeout == 1
+    assert lambda_app_module.ssm_provider.client.meta.config.read_timeout == 2
+    assert lambda_app_module.persistence_layer.client.meta.config.connect_timeout == 1
+    assert lambda_app_module.persistence_layer.client.meta.config.read_timeout == 2
+
+
+def test_tenant_id_does_not_bleed_into_prerouting_logs(apigw_event, lambda_context, lambda_app_module, monkeypatch):
+    """tenant_id appended in one warm invocation must not tag the next request's pre-routing logs.
+
+    Powertools' append_keys persists for the life of the warm container, and
+    tenant_id is appended only once routing succeeds — so without clear_state
+    on inject_lambda_context, a request rejected *before* the route runs (the
+    400 missing-Idempotency-Key path here) would log the *previous* request's
+    tenant_id, misattributing one tenant's malformed traffic to another in
+    every per-tenant Logs Insights query. Two invocations against the same
+    module state simulate the warm container.
+    """
+    import copy
+    import io
+
+    # Invocation 1: routed normally — appends tenant_id ("anonymous") to the logger.
+    lambda_app_module.lambda_handler(apigw_event, lambda_context)
+
+    # Invocation 2: rejected before routing (missing Idempotency-Key → 400).
+    monkeypatch.delenv("POWERTOOLS_IDEMPOTENCY_DISABLED", raising=False)
+    rejected_event = copy.deepcopy(apigw_event)
+    del rejected_event["headers"]["Idempotency-Key"]
+
+    logger = lambda_app_module.logger
+    buf = io.StringIO()
+    swapped = [h for h in logger.handlers if hasattr(h, "stream")]
+    originals = [h.stream for h in swapped]
+    for handler in swapped:
+        handler.stream = buf
+    try:
+        ret = lambda_app_module.lambda_handler(rejected_event, lambda_context)
+    finally:
+        for handler, original in zip(swapped, originals, strict=True):
+            handler.stream = original
+
+    assert ret["statusCode"] == 400
+    rejection_lines = [line for line in buf.getvalue().splitlines() if "Request rejected" in line]
+    assert rejection_lines, "expected the rejection warning to be logged"
+    assert "tenant_id" not in rejection_lines[0]
+
+
+def test_env_model_requires_powertools_variables(lambda_app_module):
+    """The cold-start env gate covers the Powertools variables too.
+
+    POWERTOOLS_METRICS_NAMESPACE and POWERTOOLS_SERVICE_NAME are read by
+    Powertools rather than handler code, but dropping the namespace from the
+    CDK environment block deploys fine and then fails *every* request at
+    metrics-flush time — after the business logic has already run. That is
+    exactly the deep, late failure the import-time EnvVars gate exists to
+    prevent, so the gate must validate them alongside the handler-read vars.
+    """
+    from pydantic import ValidationError
+
+    assert "POWERTOOLS_SERVICE_NAME" in lambda_app_module.EnvVars.model_fields
+
+    values = dict.fromkeys(lambda_app_module.EnvVars.model_fields, "test-value")
+    values.pop("POWERTOOLS_METRICS_NAMESPACE", None)
+
+    with pytest.raises(ValidationError, match="POWERTOOLS_METRICS_NAMESPACE"):
+        lambda_app_module.EnvVars.model_validate(values)
+
+
+def test_resolve_tenant_id_reads_nested_cognito_claims(apigw_event, lambda_app_module):
+    """A Cognito user-pool authorizer's tenant claim is found under authorizer.claims.
+
+    Custom Lambda authorizers put context keys directly on
+    ``requestContext.authorizer``, but Cognito user-pool authorizers nest the
+    JWT claims one level deeper under ``authorizer.claims`` — a fork wiring
+    Cognito would otherwise silently keep logging "anonymous" for
+    authenticated users. Both shapes must resolve.
+    """
+    from aws_lambda_powertools.utilities.data_classes import APIGatewayProxyEvent
+
+    apigw_event["requestContext"]["authorizer"] = {"claims": {"tenantId": "acme-corp"}}
+    event = APIGatewayProxyEvent(apigw_event)
+
+    assert lambda_app_module._resolve_tenant_id(event) == "acme-corp"
