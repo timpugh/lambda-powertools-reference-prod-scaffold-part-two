@@ -494,6 +494,28 @@ class TestBackendStack:
             },
         )
 
+    def test_regional_waf_rate_limits_direct_callers_only(self, backend_template: Template) -> None:
+        # The regional ACL rate-limits only requests WITHOUT X-Forwarded-For —
+        # direct execute-api callers, the CloudFront-bypass path. Funnelled
+        # traffic always carries the XFF header CloudFront appends toward the
+        # origin, so it must never match: the scope-down NotStatement is the
+        # security-critical part, not just the rule's presence. Without this
+        # rule one direct caller could exhaust the shared stage throttle and
+        # starve legitimate funnelled users (see _attach_regional_waf).
+        acls = backend_template.find_resources("AWS::WAFv2::WebACL")
+        regional = [a for a in acls.values() if a["Properties"]["Scope"] == "REGIONAL"]
+        assert len(regional) == 1, "expected exactly one REGIONAL WebACL"
+        rules = {r["Name"]: r for r in regional[0]["Properties"]["Rules"]}
+        rule = rules.get("RateLimitDirectCallers")
+        assert rule is not None, "expected the direct-caller rate rule on the regional ACL"
+        assert rule["Action"] == {"Block": {}}
+        stmt = rule["Statement"]["RateBasedStatement"]
+        assert stmt["AggregateKeyType"] == "IP"
+        scope_down = stmt["ScopeDownStatement"]["NotStatement"]["Statement"]["SizeConstraintStatement"]
+        assert scope_down["FieldToMatch"]["SingleHeader"]["Name"] == "x-forwarded-for"
+        assert scope_down["ComparisonOperator"] == "GT"
+        assert scope_down["Size"] == 0
+
     def test_appinsights_dashboard_cleanup_targets_real_dashboard_name(self, backend_template: Template) -> None:
         # Application Insights names its auto-created dashboard
         # "ApplicationInsights-{resource-group-name}", and the resource group
@@ -1083,6 +1105,23 @@ class TestAuditStack:
 
     def test_cmk_has_rotation_enabled(self, audit_template: Template) -> None:
         audit_template.has_resource_properties("AWS::KMS::Key", {"EnableKeyRotation": True})
+
+    def test_cloudtrail_key_grant_scoped_to_exact_trail_arn(self, audit_template: Template) -> None:
+        # The trail name is pinned, so the CMK's CloudTrail service grant can
+        # (and must) name the one trail allowed to use the key — a trail/*
+        # wildcard would let any other trail in this account encrypt with the
+        # audit CMK. aws:SourceAccount stays as defense in depth.
+        keys = audit_template.find_resources("AWS::KMS::Key")
+        statements = [s for k in keys.values() for s in k["Properties"]["KeyPolicy"]["Statement"]]
+        ct_statements = [s for s in statements if s.get("Principal", {}).get("Service") == "cloudtrail.amazonaws.com"]
+        assert len(ct_statements) == 1, "expected exactly one CloudTrail service grant on the audit CMK"
+        condition = ct_statements[0]["Condition"]
+        source_arn = json.dumps(condition["ArnLike"]["aws:SourceArn"], default=str)
+        assert "trail/TestAuditStack-S3DataEventsTrail" in source_arn, (
+            "CloudTrail key grant must pin aws:SourceArn to the exact pinned trail ARN, not trail/*"
+        )
+        assert "trail/*" not in source_arn
+        assert condition["StringEquals"]["aws:SourceAccount"] == _TEST_ACCOUNT
 
     def test_one_s3_bucket_with_90_day_lifecycle(self, audit_template: Template) -> None:
         audit_template.resource_count_is("AWS::S3::Bucket", 1)

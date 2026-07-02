@@ -65,9 +65,12 @@ metrics = Metrics()
 # starts returning throttling (429) responses; its token-bucket state is useful
 # here because the clients are module-scoped (constructed once below) and reused
 # across every warm invocation, so the limiter persists for the container's life.
-# max_attempts=4 is the TOTAL attempt budget in standard/adaptive modes (1 initial
-# request + up to 3 retries; only legacy mode counts retries-after-initial) —
-# comfortably inside the function's 10s timeout. Retrying is
+# total_max_attempts (NOT max_attempts) on purpose: botocore's Config retries
+# key "max_attempts" counts retries-after-initial and is stored as
+# total_max_attempts = max_attempts + 1 — an off-by-one that silently inflates
+# the budget (this codebase shipped 5 total attempts while the comment claimed
+# 4). total_max_attempts pins the total unambiguously: 1 initial + 2 retries.
+# Retrying is
 # safe because the write path (DynamoDB via @idempotent) is idempotent on the
 # client-supplied Idempotency-Key, and the SSM/AppConfig calls are reads. This
 # implements the AWS "retry with backoff" prescriptive-guidance pattern without
@@ -77,12 +80,22 @@ metrics = Metrics()
 # six times the function's own 10s timeout, so a single hung connection would
 # otherwise consume the whole invocation (502 to the caller) before the first
 # retry ever fired. Bounding the attempt turns a hang into a fast, retryable
-# error; 1s/2s is generous for the small same-region SSM/AppConfig/DynamoDB
+# error; 0.5s/1s is generous for the small same-region SSM/AppConfig/DynamoDB
 # calls this handler makes.
+# Budget math (keep it under the function timeout when tuning): the FULL retry
+# budget for one hung dependency is total attempts x (connect + read) plus
+# exponential-backoff sleeps between attempts — here 3 x 1.5s = 4.5s plus
+# ≤ ~3s of jittered sleeps ≈ 7.5s worst case, inside the function's 10s
+# timeout with headroom for the up-to-three sequential AWS calls a cold
+# request makes. (The previous config — max_attempts=4, i.e. 5 total attempts
+# x 3s = 15s — exceeded the timeout on its own: a browned-out dependency
+# became an API Gateway 502 — off the OpenAPI contract, no CORS header —
+# instead of the designed fast 500, and fed the canary rollback alarm during
+# deploys.)
 boto_config = Config(
-    retries={"mode": "adaptive", "max_attempts": 4},
-    connect_timeout=1,
-    read_timeout=2,
+    retries={"mode": "adaptive", "total_max_attempts": 3},
+    connect_timeout=0.5,
+    read_timeout=1,
 )
 
 # enable_validation=True wires Pydantic into the resolver. Request bodies and
@@ -241,22 +254,31 @@ def get_greeting() -> GreetingResponse:
     user_agent = event.request_context.identity.user_agent
     request_id = event.request_context.request_id
 
-    # Tenant context as a first-class observability dimension. Today there is no
+    # Tenant context as a first-class observability signal. Today there is no
     # auth, so this is always "anonymous" (see _resolve_tenant_id); the value
     # goes live the day a fork puts a tenant claim on the request. Tagging all
-    # three signals here means logs, EMF metrics, and the X-Ray trace can be
+    # three signals here means logs, EMF records, and the X-Ray trace can be
     # sliced per tenant without a retrofit. Powertools propagates appended log
     # keys across Logger instances of the same service, and shares one metric
     # store, so the service layer's records and metrics inherit tenant_id too —
     # no need to thread it through build_greeting.
-    # Cardinality caveat: a tenant_id metric *dimension* creates one metric
-    # stream per distinct value — harmless at "anonymous"/low tenant counts, but
-    # size it (or drop the dimension) before turning this loose on thousands of
-    # tenants, since each unique value is a separately billed custom metric.
+    # Metadata, NOT add_dimension: a dimension changes the EMF dimension set to
+    # {service, tenant_id}, and CloudWatch matches custom metrics on the EXACT
+    # dimension set — every consumer that addresses these metrics by {service}
+    # alone (the GreetingRequests dashboard widget and the
+    # FeatureFlagEvaluationFailure AppConfig rollback alarm in
+    # infrastructure/backend_app.py) silently stops seeing data. Metadata rides
+    # the same EMF blob, so per-tenant queries still work in Logs Insights
+    # (`filter tenant_id = ...`), without forking the metric identity or paying
+    # the per-distinct-value custom-metric billing a dimension incurs. A fork
+    # that wants true per-tenant metric *streams* must add tenant_id to those
+    # consumers' dimensions_map in the same commit — both sides of the
+    # telemetry contract move together (pinned by the EMF dimension-set unit
+    # test in tests/unit/test_handler.py).
     tenant_id = _resolve_tenant_id(event)
     logger.append_keys(tenant_id=tenant_id)
     tracer.put_annotation(key="tenant_id", value=tenant_id)
-    metrics.add_dimension(name="tenant_id", value=tenant_id)
+    metrics.add_metadata(key="tenant_id", value=tenant_id)
 
     logger.info(
         "Request received",

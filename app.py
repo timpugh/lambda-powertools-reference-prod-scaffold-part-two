@@ -62,7 +62,7 @@ import os
 
 import aws_cdk as cdk
 
-from infrastructure.app_stage import DEFAULT_ENV_NAME, AppStage, stage_id
+from infrastructure.app_stage import DEFAULT_ENV_NAME, AppStage, parse_context_flag, stage_id
 
 app = cdk.App()
 
@@ -77,10 +77,12 @@ target_region: str = app.node.try_get_context("region") or "us-east-1"
 env_name: str = app.node.try_get_context("env") or os.environ.get("ENVIRONMENT") or DEFAULT_ENV_NAME
 
 # Retention switch for the stateful data stack. Context values arrive as
-# strings on the CLI (`-c retain_data=true`) or as a native bool from
-# cdk.json, so normalise both. Default False keeps the template destroy-friendly.
-_retain_ctx = app.node.try_get_context("retain_data")
-retain_data: bool = _retain_ctx if isinstance(_retain_ctx, bool) else str(_retain_ctx).lower() == "true"
+# strings on the CLI (`-c retain_data=true`) or as a native bool from cdk.json;
+# parse_context_flag normalises both and FAILS SYNTH on anything else — a typo
+# like `-c retain_data=yes` silently coercing to False would strip retention
+# and deletion protection from a deployment the operator believes is protected.
+# Default (flag absent) is False, keeping the template destroy-friendly.
+retain_data: bool = parse_context_flag(app.node.try_get_context("retain_data"), "retain_data")
 
 # Opt-in AppConfig gradual rollout + alarm rollback monitor (`-c appconfig_monitor=true`).
 # Default False so the cold/first deploy always succeeds: a CFN-managed AppConfig
@@ -88,8 +90,7 @@ retain_data: bool = _retain_ctx if isinstance(_retain_ctx, bool) else str(_retai
 # fresh stack's metric always is — see backend_app._attach_appconfig_rollback_monitor
 # and README "Deployment safety". Turn it on only AFTER a first all-at-once deploy has
 # produced metric data, to protect ongoing flag changes.
-_monitor_ctx = app.node.try_get_context("appconfig_monitor")
-appconfig_monitor: bool = _monitor_ctx if isinstance(_monitor_ctx, bool) else str(_monitor_ctx).lower() == "true"
+appconfig_monitor: bool = parse_context_flag(app.node.try_get_context("appconfig_monitor"), "appconfig_monitor")
 
 # Stage id composition lives next to the Stage (app_stage.stage_id):
 # prod keeps the legacy id so existing cdk.out assembly paths and tooling

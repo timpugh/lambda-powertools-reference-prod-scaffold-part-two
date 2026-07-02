@@ -84,7 +84,11 @@ class WafStack(Stack):
             "WebACL",
             # Explicit name so the WAF→S3 log path (…/WAFLogs/cloudfront/{name}/) is
             # deterministic — the frontend's Athena Glue table points at it. WAF
-            # log delivery uses the WebACL *name* in the S3 key prefix.
+            # log delivery uses the WebACL *name* in the S3 key prefix. Pinned
+            # physical name: a future replacement-forcing property change collides
+            # with the not-yet-deleted old ACL (CFN replacement is
+            # create-before-delete), so such a change must also change the name in
+            # the same commit — see the AppConfig profile note in backend_app.py.
             name=f"{self.stack_name}-cf",
             scope="CLOUDFRONT",
             default_action=wafv2.CfnWebACL.DefaultActionProperty(allow={}),

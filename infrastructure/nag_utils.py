@@ -92,7 +92,7 @@ def grant_logs_service_to_key(key: kms.Key, *, region: str, account: str, partit
     )
 
 
-def grant_cloudtrail_service_to_key(key: kms.Key, *, region: str, account: str, partition: str) -> None:
+def grant_cloudtrail_service_to_key(key: kms.Key, *, account: str, trail_arn: str) -> None:
     """Grant CloudTrail the KMS operations needed to write CMK-encrypted trail log files.
 
     CloudTrail needs explicit KMS grants on the encryption key to deliver
@@ -103,11 +103,14 @@ def grant_cloudtrail_service_to_key(key: kms.Key, *, region: str, account: str, 
     logs/GuardDuty grants above so all service-principal statements on the
     project's CMKs live in one module and stay in lockstep.
 
-    Confused-deputy guard: the grant is scoped to trails in this account. Trail
-    names are generated per stack, so the ``aws:SourceArn`` condition uses a
-    wildcard trail ARN for the account+region; CloudTrail sets aws:SourceArn to
-    the trail ARN on every encrypt call. ``aws:SourceAccount`` is checked too as
-    defense in depth (some older trail integrations omit aws:SourceArn).
+    Confused-deputy guard: scoped to the EXACT trail. The trail's name is
+    pinned in ``AuditStack`` (its ARN is constructed before the trail resource
+    exists — the same technique as the bucket-policy Deny statements there), so
+    ``aws:SourceArn`` can name the one trail allowed to use this key rather
+    than a ``trail/*`` wildcard — any *other* trail in this account is denied
+    too. CloudTrail sets aws:SourceArn to the trail ARN on every encrypt call;
+    ``aws:SourceAccount`` is checked as defense in depth (some older trail
+    integrations omit aws:SourceArn).
     """
     key.add_to_resource_policy(
         iam.PolicyStatement(
@@ -116,9 +119,7 @@ def grant_cloudtrail_service_to_key(key: kms.Key, *, region: str, account: str, 
             resources=["*"],
             conditions={
                 "StringEquals": {"aws:SourceAccount": account},
-                "ArnLike": {
-                    "aws:SourceArn": f"arn:{partition}:cloudtrail:{region}:{account}:trail/*",
-                },
+                "ArnLike": {"aws:SourceArn": trail_arn},
             },
         )
     )
@@ -206,14 +207,17 @@ def build_managed_threat_rules(metric_prefix: str) -> list[wafv2.CfnWebACL.RuleP
     a managed rule group that's added to one ACL but forgotten on the other is
     exactly the kind of asymmetry this consolidation prevents.
 
-    The rate-based rule is intentionally NOT part of this shared set. It belongs
-    only on the CLOUDFRONT ACL, where it aggregates by plain ``IP``: a
-    CLOUDFRONT-scoped ACL inspects the *viewer* request, so the source IP it
-    sees is already the real client's. On the regional ACL guarding the origin,
-    every request arrives from a CloudFront edge IP, so an IP-aggregated limit
-    there would penalise legitimate funnelled traffic; origin-side volume is
-    bounded instead by API Gateway stage throttling and the function's
-    reserved concurrency.
+    No rate-based rule is part of this shared set because edge and origin need
+    different aggregation, so each ACL carries its own. The CLOUDFRONT ACL
+    aggregates by plain ``IP``: it inspects the *viewer* request, so the source
+    IP it sees is already the real client's. On the regional ACL guarding the
+    origin, *funnelled* traffic arrives from CloudFront edge IPs (plain-IP
+    aggregation would pool many users behind a few shared edge IPs) — but
+    *direct* ``execute-api`` callers, the bypass path the regional ACL exists
+    to cover, arrive from their own IPs without the ``X-Forwarded-For`` header
+    CloudFront appends toward the origin. The regional ACL therefore carries an
+    IP-aggregated rate rule scoped down to XFF-less requests only — see
+    ``BackendApp._attach_regional_waf``.
 
     Args:
         metric_prefix: Prefix for each rule's CloudWatch metric name (the caller
@@ -533,7 +537,11 @@ def create_waf_logs_bucket(scope: Construct, suffix: str) -> s3.Bucket:
     (an AWS hard requirement — so this is a pinned name, unlike the auto-named
     buckets elsewhere). It's account-qualified for S3's global uniqueness plus a
     short hash of the stack name so multi-env / multi-region deployments in one
-    account never collide on the name.
+    account never collide on the name. Pinned-name caveat: a future
+    replacement-forcing property change collides with the not-yet-deleted old
+    bucket (CFN replacement is create-before-delete), so such a change must
+    also change the name (e.g. the ``suffix``) in the same commit — see the
+    AppConfig profile note in ``backend_app.py``.
 
     **The bucket policy must be complete before logging is enabled.** When WAF
     logging is turned on it ensures the ``delivery.logs.amazonaws.com`` write +

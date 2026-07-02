@@ -382,12 +382,19 @@ class BackendApp(Construct):
             # suppressions below).
             retry_attempts=0,
             # Reserved concurrency caps how much of the account's concurrency pool
-            # (default 1000) this one function can consume, so a runaway loop or a
-            # traffic spike on /greeting can't starve every other Lambda in the
-            # account. 100 is a deliberately modest ceiling for a reference
-            # workload — size it to real peak traffic in a fork (and note that a
-            # reserved value also guarantees that headroom is always available to
-            # this function). Retires the NIST.800.53.R5-LambdaConcurrency /
+            # this one function can consume, so a runaway loop or a traffic spike
+            # on /greeting can't starve every other Lambda in the account. 100 is
+            # a deliberately modest ceiling for a reference workload — size it to
+            # real peak traffic in a fork (and note that a reserved value also
+            # guarantees that headroom is always available to this function).
+            # First-deploy precondition: Lambda rejects any reservation that
+            # would leave the account's UNRESERVED pool below 100, so this line
+            # needs an applied account concurrency quota of at least 200. The
+            # documented default is 1000, but fresh accounts often start with a
+            # much lower applied quota — check `aws lambda get-account-settings`
+            # and request an increase (or lower this value) before the first
+            # deploy in a new account, or the stack fails on this resource.
+            # Retires the NIST.800.53.R5-LambdaConcurrency /
             # HIPAA.Security-LambdaConcurrency suppressions below.
             reserved_concurrent_executions=100,
             tracing=_lambda.Tracing.ACTIVE,
@@ -848,24 +855,82 @@ class BackendApp(Construct):
         Scope must be ``REGIONAL`` and the ACL must live in the API's own region
         (which is why it's here, in the backend stack, not in the us-east-1-pinned
         WAF stack). The shared ``build_managed_threat_rules`` helper guarantees the
-        rule set never drifts from the CloudFront ACL. The rate-based rule is
-        deliberately omitted — every request reaching the origin comes from a
-        CloudFront edge IP, so an IP-aggregated limit would penalise legitimate
-        funnelled traffic; origin volume is bounded by the stage's
-        throttling_rate_limit/throttling_burst_limit and the function's
-        reserved_concurrent_executions instead.
+        rule set never drifts from the CloudFront ACL.
 
-        This is defence in depth, not a replacement for the documented fixes:
+        The shared set omits a rate rule because edge and origin need different
+        aggregation, so this ACL carries its own (``RateLimitDirectCallers``,
+        priority 4): funnelled traffic reaches the origin from CloudFront edge
+        IPs (a plain IP-aggregated limit would pool many legitimate users behind
+        a few shared edge IPs), while a *direct* ``execute-api`` caller — the
+        bypass path this ACL exists to cover — arrives from its own IP and
+        without the ``X-Forwarded-For`` header CloudFront always appends toward
+        the origin. Scoping an IP-aggregated limit to XFF-less requests
+        rate-limits each direct caller per client IP while leaving funnelled
+        traffic untouched; without it, one direct caller could exhaust the
+        *shared* stage throttle (throttling_rate_limit=100) and starve the
+        legitimate CloudFront-funnelled users behind it.
+
+        This is defence in depth, not a replacement for the documented fixes: a
+        direct caller can spoof ``X-Forwarded-For`` to evade the rate rule, so
         a fork can still add a CloudFront-injected secret header + API Gateway
         resource policy to make the origin reject any non-CloudFront request
-        outright (TODO "Close the CloudFront-bypass window").
+        outright (TODO "Close the CloudFront-bypass window" option (b)).
         """
         stack = Stack.of(self)
+
+        # Rate-limit DIRECT callers only (priority 4, after the shared managed
+        # groups at 0-3). The scope-down statement matches only requests WITHOUT
+        # an X-Forwarded-For header — CloudFront always appends XFF toward the
+        # origin, so funnelled traffic never matches and only direct execute-api
+        # callers are counted, each aggregated by its own client IP. See the
+        # method docstring for the full rationale and the spoofing caveat.
+        direct_caller_rate_rule = wafv2.CfnWebACL.RuleProperty(
+            name="RateLimitDirectCallers",
+            priority=4,
+            action=wafv2.CfnWebACL.RuleActionProperty(block={}),
+            statement=wafv2.CfnWebACL.StatementProperty(
+                rate_based_statement=wafv2.CfnWebACL.RateBasedStatementProperty(
+                    # 300 requests / 5 min per direct-caller IP — above any
+                    # plausible legitimate direct use (the frontend goes through
+                    # CloudFront), well under the shared stage throttle it protects.
+                    limit=300,
+                    aggregate_key_type="IP",
+                    scope_down_statement=wafv2.CfnWebACL.StatementProperty(
+                        not_statement=wafv2.CfnWebACL.NotStatementProperty(
+                            statement=wafv2.CfnWebACL.StatementProperty(
+                                # "Header present and non-empty" — WAF has no
+                                # first-class exists-check, so match length > 0.
+                                size_constraint_statement=wafv2.CfnWebACL.SizeConstraintStatementProperty(
+                                    field_to_match=wafv2.CfnWebACL.FieldToMatchProperty(
+                                        single_header={"Name": "x-forwarded-for"}
+                                    ),
+                                    comparison_operator="GT",
+                                    size=0,
+                                    text_transformations=[
+                                        wafv2.CfnWebACL.TextTransformationProperty(priority=0, type="NONE")
+                                    ],
+                                )
+                            )
+                        )
+                    ),
+                )
+            ),
+            visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
+                cloud_watch_metrics_enabled=True,
+                metric_name=f"{stack.stack_name}-api-RateLimitDirectCallers",
+                sampled_requests_enabled=True,
+            ),
+        )
+
         regional_acl = wafv2.CfnWebACL(
             self,
             "ApiRegionalWebACL",
             # Explicit name so the WAF→S3 log path (…/WAFLogs/{region}/{name}/) is
-            # deterministic for the frontend's Athena Glue table.
+            # deterministic for the frontend's Athena Glue table. Pinned physical
+            # name: a future replacement-forcing property change collides with the
+            # not-yet-deleted old ACL (CFN replacement is create-before-delete), so
+            # such a change must also change the name in the same commit — see the
+            # AppConfig profile note above.
             name=f"{stack.stack_name}-api",
             scope="REGIONAL",
             default_action=wafv2.CfnWebACL.DefaultActionProperty(allow={}),
@@ -874,7 +939,7 @@ class BackendApp(Construct):
                 metric_name=f"{stack.stack_name}ApiRegionalWebACL",
                 sampled_requests_enabled=True,
             ),
-            rules=build_managed_threat_rules(f"{stack.stack_name}-api"),
+            rules=[*build_managed_threat_rules(f"{stack.stack_name}-api"), direct_caller_rate_rule],
         )
 
         # WAF logging — required by NIST/HIPAA/PCI WAFv2LoggingEnabled, mirroring

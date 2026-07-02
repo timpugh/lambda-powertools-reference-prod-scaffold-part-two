@@ -98,7 +98,7 @@
                         {
                           "Ref": "AWS::AccountId"
                         },
-                        ":trail/*"
+                        ":trail/ServerlessAppAudit-us-east-1-S3DataEventsTrail"
                       ]
                     ]
                   }

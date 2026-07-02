@@ -335,6 +335,11 @@ class FrontendStack(Stack):
             allow_unauthenticated_identities=True,
             identity_pool_name=f"{self.stack_name}-rum",
         )
+        # Pinned physical name (the IAM role below references the constructed
+        # ARN): a future replacement-forcing property change collides with the
+        # not-yet-deleted old monitor (CFN replacement is create-before-delete),
+        # so such a change must also change the name in the same commit — see
+        # the AppConfig profile note in backend_app.py.
         rum_monitor_name = f"{self.stack_name}-rum"
         rum_monitor_arn = f"arn:{self.partition}:rum:{self.region}:{self.account}:appmonitor/{rum_monitor_name}"
         rum_unauth_role = iam.Role(
@@ -968,6 +973,15 @@ class FrontendStack(Stack):
         """Create Glue catalog tables and Athena workgroup for CloudFront/S3 access log analytics."""
         # ── Glue Database ────────────────────────────────────────────────
         # Glue database names: lowercase, alphanumeric + underscores only.
+        #
+        # Pinned physical names, stack-wide caveat: the Glue database and every
+        # table in it (cloudfront_logs, s3_access_logs, waf_*), plus the Athena
+        # workgroup below, carry explicit names (Glue/Athena L1s require them).
+        # A replacement-forcing property change — e.g. editing a table's
+        # partition_keys — collides with the not-yet-deleted old resource (CFN
+        # replacement is create-before-delete: AlreadyExistsException), so such
+        # a change must also change the pinned name in the same commit — see
+        # the AppConfig profile note in backend_app.py.
         db_name = self.node.id.lower().replace("-", "_") + "_access_logs"
 
         glue_db = glue.CfnDatabase(

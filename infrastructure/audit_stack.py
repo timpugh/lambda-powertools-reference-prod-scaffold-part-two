@@ -84,6 +84,21 @@ class AuditStack(Stack):
         # destroy-friendly one must, or `cdk destroy` fails on a non-empty bucket.
         auto_delete = not retain_data
 
+        # Pin the trail name so its ARN is known *before* the trail resource is
+        # created — needed both to break the dependency cycle that would
+        # otherwise form between the trail (which CDK auto-wires to depend on
+        # its bucket policy) and the confused-deputy Deny statements on the
+        # bucket policy (which reference the trail ARN), and to let the CMK's
+        # CloudTrail service grant below scope aws:SourceArn to this exact
+        # trail instead of a trail/* wildcard. Same constructed-ARN technique
+        # as the RUM monitor in the frontend stack. Pinned-name caveat: a
+        # future replacement-forcing property change collides with the
+        # not-yet-deleted old trail (CFN replacement is create-before-delete),
+        # so such a change must also change the name in the same commit — see
+        # the AppConfig profile note in backend_app.py.
+        trail_name = f"{self.stack_name}-S3DataEventsTrail"
+        trail_arn = f"arn:{self.partition}:cloudtrail:{self.region}:{self.account}:trail/{trail_name}"
+
         # ── Dedicated audit CMK ──────────────────────────────────────────────
         # Encrypts the CloudTrail log files (per-object SSE-KMS) and the trail's
         # CloudWatch log group. Kept here with the audit data so retention is
@@ -104,9 +119,8 @@ class AuditStack(Stack):
         )
         grant_cloudtrail_service_to_key(
             self.encryption_key,
-            region=self.region,
             account=self.account,
-            partition=self.partition,
+            trail_arn=trail_arn,
         )
 
         # ── CloudTrail log bucket ────────────────────────────────────────────
@@ -135,15 +149,6 @@ class AuditStack(Stack):
             retention=logs.RetentionDays.ONE_WEEK,
             removal_policy=RemovalPolicy.DESTROY,
         )
-
-        # Pin the trail name so its ARN is known *before* the trail resource is
-        # created — needed to break the dependency cycle that would otherwise
-        # form between the trail (which CDK auto-wires to depend on its bucket
-        # policy) and the confused-deputy Deny statements on the bucket policy
-        # (which reference the trail ARN). Same constructed-ARN technique as the
-        # RUM monitor in the frontend stack.
-        trail_name = f"{self.stack_name}-S3DataEventsTrail"
-        trail_arn = f"arn:{self.partition}:cloudtrail:{self.region}:{self.account}:trail/{trail_name}"
 
         # Confused-deputy guard on the CloudTrail bucket policy. CDK's Trail L2
         # grants cloudtrail.amazonaws.com s3:GetBucketAcl + s3:PutObject without

@@ -78,6 +78,31 @@ def validate_env_name(env_name: str) -> str:
     return env_name
 
 
+def parse_context_flag(raw: object, key: str) -> bool:
+    """Parse a boolean CDK context flag strictly, failing synth on junk values.
+
+    Context values arrive as native bools from cdk.json but as strings from the
+    CLI (``-c retain_data=true``). Anything other than true/false (any casing)
+    is rejected at synth: silently coercing an unrecognized value
+    (``-c retain_data=yes``, ``=1``, ``=on``) to False would deploy a
+    production fork WITHOUT retention or deletion protection while the operator
+    believes data is protected — the same fail-loud-at-synth rationale as
+    :func:`validate_env_name`. ``None`` (flag not provided) is the documented
+    default: False.
+    """
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in ("true", "false"):
+        return text == "true"
+    raise ValueError(
+        f"Invalid value for CDK context flag {key!r}: {raw!r}. "
+        f"Use -c {key}=true or -c {key}=false (or a JSON boolean in cdk.json)."
+    )
+
+
 def stage_id(env_name: str, region: str) -> str:
     """Compose the Stage construct id for an environment + region pair.
 

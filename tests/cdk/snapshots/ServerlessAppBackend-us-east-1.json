@@ -1363,6 +1363,45 @@
               "MetricName": "ServerlessAppBackend-us-east-1-api-AnonymousIpList",
               "SampledRequestsEnabled": true
             }
+          },
+          {
+            "Action": {
+              "Block": {}
+            },
+            "Name": "RateLimitDirectCallers",
+            "Priority": 4,
+            "Statement": {
+              "RateBasedStatement": {
+                "AggregateKeyType": "IP",
+                "Limit": 300,
+                "ScopeDownStatement": {
+                  "NotStatement": {
+                    "Statement": {
+                      "SizeConstraintStatement": {
+                        "ComparisonOperator": "GT",
+                        "FieldToMatch": {
+                          "SingleHeader": {
+                            "Name": "x-forwarded-for"
+                          }
+                        },
+                        "Size": 0,
+                        "TextTransformations": [
+                          {
+                            "Priority": 0,
+                            "Type": "NONE"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "VisibilityConfig": {
+              "CloudWatchMetricsEnabled": true,
+              "MetricName": "ServerlessAppBackend-us-east-1-api-RateLimitDirectCallers",
+              "SampledRequestsEnabled": true
+            }
           }
         ],
         "Scope": "REGIONAL",

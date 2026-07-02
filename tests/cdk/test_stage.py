@@ -26,7 +26,7 @@ aws_cdk = pytest.importorskip("aws_cdk", reason="aws_cdk not installed — skipp
 import aws_cdk as cdk
 from aws_cdk.assertions import Annotations, Match, Template
 
-from infrastructure.app_stage import DEFAULT_ENV_NAME, AppStage, validate_env_name
+from infrastructure.app_stage import DEFAULT_ENV_NAME, AppStage, parse_context_flag, validate_env_name
 
 # Skip Docker bundling so these tests run without Docker (same key the CLI honours).
 _NO_BUNDLING = {"aws:cdk:bundling-stacks": []}
@@ -88,6 +88,33 @@ class TestEnvironmentNaming:
         # app.py and the Makefile lean on this default; changing it silently
         # re-points bare `cdk deploy` away from the long-lived stacks.
         assert DEFAULT_ENV_NAME == "prod"
+
+
+class TestContextFlagParsing:
+    """app.py parses retain_data / appconfig_monitor via parse_context_flag."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (None, False),  # flag absent — the documented destroy-friendly default
+            (True, True),  # native bool from cdk.json
+            (False, False),
+            ("true", True),  # CLI string forms, any casing
+            ("TRUE", True),
+            ("false", False),
+            ("False", False),
+        ],
+    )
+    def test_recognized_values(self, raw: object, expected: bool) -> None:
+        assert parse_context_flag(raw, "retain_data") is expected
+
+    @pytest.mark.parametrize("raw", ["yes", "1", "on", "retain", ""])
+    def test_unrecognized_values_fail_at_synth(self, raw: str) -> None:
+        # `-c retain_data=yes` silently coercing to False would deploy DESTROY
+        # policies with no deletion protection while the operator believes
+        # production data is retained — fail the synth loudly instead.
+        with pytest.raises(ValueError, match="retain_data"):
+            parse_context_flag(raw, "retain_data")
 
 
 class TestStackTags:
@@ -221,3 +248,39 @@ class TestNagCompliance:
         stage = AppStage(app, "ServerlessApp-us-east-1-stage", region="us-east-1", appconfig_monitor=True)
         errors = Annotations.from_stack(stage.backend).find_error("*", Match.string_like_regexp(".*"))
         assert not errors
+
+    def test_retain_data_shape_has_no_unsuppressed_nag_errors(self) -> None:
+        # The production-fork shape (retain_data=True: RETAIN + deletion/
+        # termination protection, retained buckets with no auto-delete
+        # provider) is never synthesized by the CI CLI gate (default context) —
+        # this is its only nag gate. A finding unique to the retained shape
+        # would otherwise surface for the first time on a production fork's
+        # own synth, after they flip the one switch the template tells them to.
+        app = cdk.App(context=_NO_BUNDLING)
+        stage = AppStage(app, "ServerlessApp-us-east-1-stage", region="us-east-1", retain_data=True)
+        for stack in (stage.data, stage.audit):
+            errors = Annotations.from_stack(stack).find_error("*", Match.string_like_regexp(".*"))
+            assert not errors, f"unsuppressed cdk-nag findings on the retained shape of {stack.stack_name}"
+
+    @pytest.mark.parametrize("stack_attr", ["waf", "data", "backend", "frontend", "audit"])
+    def test_compliance_aspects_attached_to_every_stack(self, prod_stage: AppStage, stack_attr: str) -> None:
+        # The whole nag gate hangs on each stack constructor calling
+        # apply_compliance_aspects. If a refactor drops that call from one
+        # stack, every other gate passes VACUOUSLY: zero annotations here, a
+        # clean CLI synth, and unchanged snapshots (NagSuppressions write
+        # resource metadata whether or not the packs run). This is the
+        # assertion that the gate can actually fail — the five rule packs and
+        # the project's own validation Aspect must be attached to every stack.
+        aspect_names = {type(aspect).__name__ for aspect in cdk.Aspects.of(getattr(prod_stage, stack_attr)).all}
+        for expected in (
+            "AwsSolutionsChecks",
+            "ServerlessChecks",
+            "NIST80053R5Checks",
+            "HIPAASecurityChecks",
+            "PCIDSS321Checks",
+            "TemplateConventionChecks",
+        ):
+            assert expected in aspect_names, (
+                f"{expected} is not attached to the {stack_attr} stack — apply_compliance_aspects "
+                "was likely dropped from its constructor, which silently disables the nag gate there"
+            )

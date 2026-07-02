@@ -330,19 +330,52 @@ def test_tenant_id_tags_structured_logs(apigw_event, lambda_context, lambda_app_
     assert '"tenant_id":"anonymous"' in buf.getvalue()
 
 
-def test_tenant_id_added_as_metric_dimension(apigw_event, lambda_context, lambda_app_module, mocker):
-    """tenant_id is added as a CloudWatch metric dimension for the invocation.
+def test_tenant_id_added_as_metric_metadata(apigw_event, lambda_context, lambda_app_module, mocker):
+    """tenant_id rides the EMF blob as metadata, so Logs Insights can query it.
 
-    The shared Powertools metric store means the service-layer metrics
-    (GreetingRequests, FeatureFlagEvaluationFailure) inherit the dimension too,
-    so they can be charted per tenant. A refactor dropping the dimension would
-    otherwise pass every other test.
+    Metadata — NOT add_dimension. A dimension would change the EMF dimension
+    set to {service, tenant_id}, unmatching every consumer that addresses these
+    metrics by {service} alone (see test_emf_dimension_set_stays_service_only).
+    A refactor dropping the metadata would otherwise pass every other test.
     """
-    spy = mocker.patch.object(lambda_app_module.metrics, "add_dimension")
+    spy = mocker.patch.object(lambda_app_module.metrics, "add_metadata")
 
     lambda_app_module.lambda_handler(apigw_event, lambda_context)
 
-    spy.assert_any_call(name="tenant_id", value="anonymous")
+    spy.assert_any_call(key="tenant_id", value="anonymous")
+
+
+def test_emf_dimension_set_stays_service_only(apigw_event, lambda_context, lambda_app_module, capsys):
+    """The flushed EMF blob's dimension set must stay exactly [["service"]].
+
+    CloudWatch matches custom metrics on the EXACT dimension set. The
+    GreetingRequests dashboard widget and the FeatureFlagEvaluationFailure
+    AppConfig rollback alarm (infrastructure/backend_app.py) both address
+    these metrics by {service} alone — if a dimension is ever added here
+    (e.g. tenant_id via add_dimension), those consumers silently stop seeing
+    data: the KPI widget goes blank and a bad flag config rolls out with the
+    rollback alarm stuck at no-data. This is the producer half of that
+    telemetry contract; change both sides together or not at all.
+    """
+    lambda_app_module.lambda_handler(apigw_event, lambda_context)
+
+    emf_blobs = [
+        json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{") and '"_aws"' in line
+    ]
+    greeting_blobs = [
+        blob
+        for blob in emf_blobs
+        if any(m["Name"] == "GreetingRequests" for d in blob["_aws"]["CloudWatchMetrics"] for m in d["Metrics"])
+    ]
+    assert greeting_blobs, "expected the GreetingRequests EMF blob on stdout"
+    for blob in greeting_blobs:
+        for directive in blob["_aws"]["CloudWatchMetrics"]:
+            assert directive["Dimensions"] == [["service"]], (
+                "EMF dimension set drifted from [['service']] — the GreetingRequests widget and the "
+                "FeatureFlagEvaluationFailure rollback alarm query by {service} alone and would go dark"
+            )
+        # tenant_id must be present as EMF metadata (a top-level key), not a dimension.
+        assert blob.get("tenant_id") == "anonymous"
 
 
 def test_tenant_id_added_as_trace_annotation(apigw_event, lambda_context, lambda_app_module, mocker):
@@ -433,15 +466,20 @@ def test_sdk_socket_timeouts_bounded(lambda_app_module):
     own 10s timeout — so a single hung connection to SSM, AppConfig, or
     DynamoDB would consume the entire invocation budget before the adaptive
     retry policy ever fires. Explicit per-attempt bounds convert a hang into a
-    fast, retryable error. Asserting on the live clients (not just the config
-    object) catches a refactor that drops boto_config= from a constructor.
+    fast, retryable error. The values are pinned (not just asserted non-default)
+    because the FULL retry budget — total attempts x (connect + read) + backoff
+    sleeps — must stay under the function's 10s timeout; see the budget math on
+    boto_config in lambda/app.py. Asserting on the live clients (not just the
+    config object) catches a refactor that drops boto_config= from a constructor.
     """
-    assert lambda_app_module.boto_config.connect_timeout == 1
-    assert lambda_app_module.boto_config.read_timeout == 2
-    assert lambda_app_module.ssm_provider.client.meta.config.connect_timeout == 1
-    assert lambda_app_module.ssm_provider.client.meta.config.read_timeout == 2
-    assert lambda_app_module.persistence_layer.client.meta.config.connect_timeout == 1
-    assert lambda_app_module.persistence_layer.client.meta.config.read_timeout == 2
+    # botocore normalizes max_attempts to total_max_attempts inside Config.
+    assert lambda_app_module.boto_config.retries["total_max_attempts"] == 3
+    assert lambda_app_module.boto_config.connect_timeout == 0.5
+    assert lambda_app_module.boto_config.read_timeout == 1
+    assert lambda_app_module.ssm_provider.client.meta.config.connect_timeout == 0.5
+    assert lambda_app_module.ssm_provider.client.meta.config.read_timeout == 1
+    assert lambda_app_module.persistence_layer.client.meta.config.connect_timeout == 0.5
+    assert lambda_app_module.persistence_layer.client.meta.config.read_timeout == 1
 
 
 def test_tenant_id_does_not_bleed_into_prerouting_logs(apigw_event, lambda_context, lambda_app_module, monkeypatch):
