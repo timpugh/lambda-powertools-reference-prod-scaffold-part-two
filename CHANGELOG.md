@@ -5,11 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-07-03
+
+### Added
+
+- Tag logs, metrics, and traces with tenant_id
+
+### Documentation
+
+- Add a "Tailoring this to your workload" forking guide
+- Add a "Growing this into multi-tenant SaaS" forking guide
+- Document the tenant_id observability dimension as a design decision
+
+### Fixed
+
+- Harden Lambda handler per Well-Architected review findings
+- Remediate Well-Architected review findings F1-F11
+- Remediate two defects found in live deploy-test-destroy verification
+
+### Maintenance
+
+- Add /wa-review Claude Code skill for Well-Architected reviews
+- Uncap /wa-review findings and require coverage accounting
+- Harden /wa-review with practices mined from this codebase
+- Harden /wa-review round two from the completed full-codebase pass
+
 ## [2.0.3] - 2026-06-19
 
 ### Fixed
 
 - Make CDK snapshot tests portable across build environments
+
+### Maintenance
+
+- Release v2.0.3
 
 ## [2.0.2] - 2026-06-18
 
@@ -353,6 +382,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add error case unit tests for SSM failure, unknown route, and unsupported method
 - Separate CDK tests from unit tests so cdk-check CI job stops failing
 
+[2.1.0]: https://github.com/timpugh/lambda-powertools-reference/compare/v2.0.3..v2.1.0
 [2.0.3]: https://github.com/timpugh/lambda-powertools-reference/compare/v2.0.2..v2.0.3
 [2.0.2]: https://github.com/timpugh/lambda-powertools-reference/compare/v2.0.1..v2.0.2
 [2.0.1]: https://github.com/timpugh/lambda-powertools-reference/compare/v2.0.0..v2.0.1
