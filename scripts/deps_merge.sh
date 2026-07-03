@@ -114,6 +114,36 @@ process_pr() {
         return 1
     fi
 
+    # ---- Preserve Dependabot's intended versions through the re-lock ------
+    # Dependabot bumps TRANSITIVE packages only in uv.lock (nothing in
+    # pyproject.toml constrains them), and a plain `uv lock` re-resolve can
+    # silently revert those bumps — observed live: two CVE fixes
+    # (cryptography, pydantic-settings) "merged" as byte-for-byte no-ops and
+    # the weekly audit kept failing on the same advisories. Parse the intended
+    # package/version pairs from the PR title ("Bumps <pkg> from A to B") and
+    # body ("Updates `pkg` from A to B", one line per group member) and pin
+    # them through the re-lock with --upgrade-package. Root uv-ecosystem
+    # branches only — /lambda requirements PRs and other ecosystems never
+    # touch uv.lock.
+    if [[ "$branch" == dependabot/pip/* && "$branch" != dependabot/pip/lambda/* ]]; then
+        local upgrade_args=()
+        while IFS=' ' read -r dep_pkg dep_ver; do
+            [ -n "$dep_pkg" ] && upgrade_args+=(--upgrade-package "${dep_pkg}==${dep_ver}")
+        done < <(
+            gh pr view "$pr" --json title,body --jq '.title + "\n" + .body' \
+                | sed -nE 's/^.*[Bb]umps? `?([A-Za-z0-9._-]+)`? from ([0-9][0-9A-Za-z._-]*) to ([0-9][0-9A-Za-z._-]*).*$/\1 \3/p; s/^.*[Uu]pdates `([A-Za-z0-9._-]+)` from ([0-9][0-9A-Za-z._-]*) to ([0-9][0-9A-Za-z._-]*).*$/\1 \3/p' \
+                | sort -u
+        )
+        if [ ${#upgrade_args[@]} -gt 0 ]; then
+            yellow "  Re-locking with Dependabot's intended pins: ${upgrade_args[*]}"
+            if ! uv lock "${upgrade_args[@]}" >/dev/null 2>&1; then
+                red "  uv lock with the PR's intended pins failed — skipping. The bump may be"
+                red "  unsatisfiable against pyproject.toml (e.g. a co-dependency needs bumping too)."
+                return 1
+            fi
+        fi
+    fi
+
     yellow "  Running make lock..."
     if ! make lock >/dev/null 2>&1; then
         red "  make lock failed — skipping. Inspect locally with 'gh pr checkout $pr && make lock'."
@@ -136,6 +166,15 @@ process_pr() {
             red "  git commit failed (pre-commit hook?). Skipping PR."
             return 1
         fi
+    fi
+
+    # Safety net for the same failure mode: if after the re-lock the branch is
+    # byte-for-byte identical to main, the PR delivers nothing — merging it
+    # would only record a misleading "bumped X" commit while the pins stay put.
+    if git diff --quiet main...HEAD -- . && git diff --quiet; then
+        red "  After re-lock the branch is identical to main — the PR is a no-op."
+        red "  Land the bump directly (uv lock --upgrade-package pkg==version) or close the PR."
+        return 1
     fi
 
     yellow "  Force-pushing..."
