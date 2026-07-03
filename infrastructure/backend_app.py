@@ -84,7 +84,6 @@ from infrastructure.nag_utils import (
     create_auto_delete_objects_log_group,
     create_waf_logs_bucket,
     grant_cloudwatch_alarms_to_key,
-    grant_guardduty_service_to_key,
     grant_logs_service_to_key,
 )
 
@@ -174,20 +173,24 @@ class BackendApp(Construct):
             account=stack.account,
             partition=stack.partition,
         )
-        # GuardDuty Lambda Protection inspects Lambda function config, including
-        # CMK-encrypted env vars. Without this grant the service role is denied
-        # kms:Decrypt and GuardDuty's coverage of this Lambda is incomplete.
-        # Scoped via aws:SourceAccount + aws:SourceArn to this account+region's
-        # detectors only. Applied to the backend CMK only because that's the
-        # key encrypting the Lambda — the frontend and WAF CMKs encrypt log
-        # groups and an S3 bucket that GuardDuty does not currently inspect
-        # through this key.
-        grant_guardduty_service_to_key(
-            self.encryption_key,
-            region=stack.region,
-            account=stack.account,
-            partition=stack.partition,
-        )
+        # Deliberately NO grant for GuardDuty (or DevOps Guru / Application
+        # Insights / Resource Explorer): those services' service-linked roles
+        # probe kms:Decrypt against this CMK when introspecting the Lambda's
+        # CMK-encrypted env vars, and are denied — by design. A previous
+        # service-principal grant (Principal: guardduty.amazonaws.com +
+        # SourceAccount/SourceArn conditions) was removed after live CloudTrail
+        # evidence (2026-07-02, GuardDuty enabled in-account) showed it can
+        # never match: the call is made by the assumed
+        # AWSServiceRoleForAmazonGuardDuty role, and a role-session principal
+        # is not matched by a service-principal key statement — the grant was
+        # dead policy. The SLR's AWS-managed policy carries no kms:Decrypt
+        # either, and GuardDuty's documented Lambda coverage (function
+        # metadata, tags, network activity) does not require reading env-var
+        # plaintext, so nothing is lost. A fork that wants these services to
+        # read CMK-encrypted config must add a key-policy statement naming the
+        # specific service-linked role ARN — possible only in accounts where
+        # that SLR already exists (KMS validates key-policy principals), which
+        # is why this template doesn't ship it.
 
         # SSM parameter for Powertools Parameters.
         # parameter_name omitted so CDK auto-generates. Lambda reads the value

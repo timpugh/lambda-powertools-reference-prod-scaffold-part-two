@@ -1046,6 +1046,11 @@ class TestFrontendStack:
         # Two WAF Glue tables (CloudFront + regional) over the aws-waf-logs-* S3
         # data, each partition-projected on log_time so Athena needs no crawler /
         # ALTER TABLE ADD PARTITION. JSON SerDe maps WAF's records to the columns.
+        # Granularity and range are pinned: Athena issues an S3 LIST per projected
+        # partition in scope, so DAY x the bucket's own NOW-90DAYS lifecycle keeps
+        # that at ~90 — a minute-granularity range anchored at a fixed date
+        # projected ~800k partitions and one unfiltered query ran 6+ minutes
+        # (found live; see _create_waf_glue_table).
         tables = frontend_template.find_resources("AWS::Glue::Table")
         waf_tables = {
             lid: t for lid, t in tables.items() if str(t["Properties"]["TableInput"].get("Name", "")).startswith("waf_")
@@ -1055,6 +1060,9 @@ class TestFrontendStack:
             ti = table["Properties"]["TableInput"]
             assert ti["Parameters"]["projection.enabled"] == "true"
             assert ti["Parameters"]["projection.log_time.type"] == "date"
+            assert ti["Parameters"]["projection.log_time.format"] == "yyyy/MM/dd"
+            assert ti["Parameters"]["projection.log_time.interval.unit"] == "DAYS"
+            assert ti["Parameters"]["projection.log_time.range"] == "NOW-90DAYS,NOW"
             assert "storage.location.template" in ti["Parameters"]
             assert ti["PartitionKeys"] == [{"Name": "log_time", "Type": "string"}]
             assert ti["StorageDescriptor"]["SerdeInfo"]["SerializationLibrary"] == "org.openx.data.jsonserde.JsonSerDe"
@@ -1065,6 +1073,20 @@ class TestFrontendStack:
         named_queries = frontend_template.find_resources("AWS::Athena::NamedQuery")
         waf_queries = [q for q in named_queries.values() if str(q["Properties"].get("Name", "")).startswith("WAF ")]
         assert len(waf_queries) == 8, f"expected 8 WAF named queries, found {len(waf_queries)}"
+
+    def test_waf_named_queries_prune_partitions(self, frontend_template: Template) -> None:
+        # The query half of the partition-projection contract: every WAF named
+        # query must filter log_time in the projection's exact yyyy/MM/dd format
+        # (slashes — Athena silently skips pruning on any other format) or the
+        # query enumerates every projected partition, paying an S3 LIST each.
+        named_queries = frontend_template.find_resources("AWS::Athena::NamedQuery")
+        waf_queries = {
+            lid: q for lid, q in named_queries.items() if str(q["Properties"].get("Name", "")).startswith("WAF ")
+        }
+        for logical_id, query in waf_queries.items():
+            sql = query["Properties"]["QueryString"]
+            assert "log_time >=" in sql, f"{logical_id} has no log_time partition filter — no pruning"
+            assert "'%Y/%m/%d'" in sql, f"{logical_id} log_time filter must render the projection's slash format"
 
     def test_athena_workgroup_is_recursively_deletable(self, frontend_template: Template) -> None:
         # Running any of the shipped named queries leaves query-execution history

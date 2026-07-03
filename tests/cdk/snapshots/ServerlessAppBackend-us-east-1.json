@@ -1799,40 +1799,6 @@
               "Resource": "*"
             },
             {
-              "Action": "kms:Decrypt",
-              "Condition": {
-                "ArnLike": {
-                  "aws:SourceArn": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "arn:",
-                        {
-                          "Ref": "AWS::Partition"
-                        },
-                        ":guardduty:us-east-1:",
-                        {
-                          "Ref": "AWS::AccountId"
-                        },
-                        ":detector/*"
-                      ]
-                    ]
-                  }
-                },
-                "StringEquals": {
-                  "aws:SourceAccount": {
-                    "Ref": "AWS::AccountId"
-                  }
-                }
-              },
-              "Effect": "Allow",
-              "Principal": {
-                "Service": "guardduty.amazonaws.com"
-              },
-              "Resource": "*",
-              "Sid": "AllowGuardDutyDecrypt"
-            },
-            {
               "Action": [
                 "kms:Decrypt",
                 "kms:GenerateDataKey*"

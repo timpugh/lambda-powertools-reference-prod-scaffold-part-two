@@ -100,7 +100,7 @@ def grant_cloudtrail_service_to_key(key: kms.Key, *, account: str, trail_arn: st
     ``cloudtrail.Trail`` don't always extend to the cloudtrail service
     principal when the key is shared with other services (CloudWatch Logs,
     CloudFront, etc.), so the principal is added explicitly — mirroring the
-    logs/GuardDuty grants above so all service-principal statements on the
+    logs grant above so all service-principal statements on the
     project's CMKs live in one module and stay in lockstep.
 
     Confused-deputy guard: scoped to the EXACT trail. The trail's name is
@@ -139,7 +139,7 @@ def grant_cloudwatch_alarms_to_key(key: kms.Key, *, account: str, region: str) -
     Confused-deputy guard: ``kms:ViaService`` pins the grant to KMS calls made
     through SNS in this region (the only path CloudWatch alarm actions use),
     and ``aws:SourceAccount`` restricts to alarms in this account.
-    ``aws:SourceArn`` is deliberately omitted: unlike CloudTrail/GuardDuty
+    ``aws:SourceArn`` is deliberately omitted: unlike CloudTrail
     above, CloudWatch is not documented to set it on the via-SNS KMS calls, and
     an unmatched required condition would deny the publish — recreating the
     silent-drop failure this grant exists to prevent.
@@ -162,34 +162,6 @@ def grant_cloudwatch_alarms_to_key(key: kms.Key, *, account: str, region: str) -
                     "aws:SourceAccount": account,
                     "kms:ViaService": f"sns.{region}.amazonaws.com",
                 },
-            },
-        )
-    )
-
-
-def grant_guardduty_service_to_key(key: kms.Key, *, region: str, account: str, partition: str) -> None:
-    """Grant GuardDuty ``kms:Decrypt`` on a CMK so Lambda Protection can introspect.
-
-    GuardDuty Lambda Protection (and similar foundational-detection features)
-    needs to read Lambda function configuration — including env vars encrypted
-    with a customer-managed key. Without this grant the assumed
-    ``AWSServiceRoleForAmazonGuardDuty`` role is denied ``kms:Decrypt`` against
-    the CMK, leaving GuardDuty's coverage of CMK-encrypted resources incomplete
-    (the original CloudTrail finding that motivated this grant).
-
-    Scoped to GuardDuty detectors in this account+region only via
-    ``aws:SourceAccount`` and ``aws:SourceArn`` — the cross-account
-    confused-deputy guard AWS documents for service-principal grants.
-    """
-    key.add_to_resource_policy(
-        iam.PolicyStatement(
-            sid="AllowGuardDutyDecrypt",
-            actions=["kms:Decrypt"],
-            principals=[iam.ServicePrincipal("guardduty.amazonaws.com")],
-            resources=["*"],
-            conditions={
-                "StringEquals": {"aws:SourceAccount": account},
-                "ArnLike": {"aws:SourceArn": f"arn:{partition}:guardduty:{region}:{account}:detector/*"},
             },
         )
     )

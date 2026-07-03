@@ -3346,9 +3346,9 @@
       ],
       "Properties": {
         "Database": "serverlessappfrontend_us_east_1_access_logs",
-        "Description": "BLOCK actions grouped by client country",
+        "Description": "BLOCK actions grouped by client country (last 30 days)",
         "Name": "WAF Regional - Blocked by Country",
-        "QueryString": "SELECT httprequest.country, COUNT(*) AS block_count\nFROM waf_regional_logs\nWHERE action = 'BLOCK'\nGROUP BY httprequest.country\nORDER BY block_count DESC\nLIMIT 25",
+        "QueryString": "SELECT httprequest.country, COUNT(*) AS block_count\nFROM waf_regional_logs\nWHERE action = 'BLOCK'\n  AND log_time >= date_format(current_timestamp - interval '30' day, '%Y/%m/%d')\nGROUP BY httprequest.country\nORDER BY block_count DESC\nLIMIT 25",
         "WorkGroup": "ServerlessAppFrontend-us-east-1-access-logs"
       },
       "Type": "AWS::Athena::NamedQuery"
@@ -3359,9 +3359,9 @@
       ],
       "Properties": {
         "Database": "serverlessappfrontend_us_east_1_access_logs",
-        "Description": "Most recent BLOCK actions with client IP, country, URI, and terminating rule",
+        "Description": "Most recent BLOCK actions (last 30 days) with client IP, country, URI, and terminating rule",
         "Name": "WAF Regional - Recent Blocked Requests",
-        "QueryString": "SELECT from_unixtime(timestamp / 1000) AS request_time,\n       httprequest.clientip, httprequest.country, httprequest.uri,\n       terminatingruleid\nFROM waf_regional_logs\nWHERE action = 'BLOCK'\nORDER BY timestamp DESC\nLIMIT 50",
+        "QueryString": "SELECT from_unixtime(timestamp / 1000) AS request_time,\n       httprequest.clientip, httprequest.country, httprequest.uri,\n       terminatingruleid\nFROM waf_regional_logs\nWHERE action = 'BLOCK'\n  AND log_time >= date_format(current_timestamp - interval '30' day, '%Y/%m/%d')\nORDER BY timestamp DESC\nLIMIT 50",
         "WorkGroup": "ServerlessAppFrontend-us-east-1-access-logs"
       },
       "Type": "AWS::Athena::NamedQuery"
@@ -3372,9 +3372,9 @@
       ],
       "Properties": {
         "Database": "serverlessappfrontend_us_east_1_access_logs",
-        "Description": "Client IPs with the most BLOCK actions",
+        "Description": "Client IPs with the most BLOCK actions (last 30 days)",
         "Name": "WAF Regional - Top Blocked Client IPs",
-        "QueryString": "SELECT httprequest.clientip, httprequest.country, COUNT(*) AS block_count\nFROM waf_regional_logs\nWHERE action = 'BLOCK'\nGROUP BY httprequest.clientip, httprequest.country\nORDER BY block_count DESC\nLIMIT 25",
+        "QueryString": "SELECT httprequest.clientip, httprequest.country, COUNT(*) AS block_count\nFROM waf_regional_logs\nWHERE action = 'BLOCK'\n  AND log_time >= date_format(current_timestamp - interval '30' day, '%Y/%m/%d')\nGROUP BY httprequest.clientip, httprequest.country\nORDER BY block_count DESC\nLIMIT 25",
         "WorkGroup": "ServerlessAppFrontend-us-east-1-access-logs"
       },
       "Type": "AWS::Athena::NamedQuery"
@@ -3385,9 +3385,9 @@
       ],
       "Properties": {
         "Database": "serverlessappfrontend_us_east_1_access_logs",
-        "Description": "Which rules terminated the most requests",
+        "Description": "Which rules terminated the most requests (last 30 days)",
         "Name": "WAF Regional - Top Terminating Rules",
-        "QueryString": "SELECT terminatingruleid, action, COUNT(*) AS hit_count\nFROM waf_regional_logs\nGROUP BY terminatingruleid, action\nORDER BY hit_count DESC\nLIMIT 25",
+        "QueryString": "SELECT terminatingruleid, action, COUNT(*) AS hit_count\nFROM waf_regional_logs\nWHERE log_time >= date_format(current_timestamp - interval '30' day, '%Y/%m/%d')\nGROUP BY terminatingruleid, action\nORDER BY hit_count DESC\nLIMIT 25",
         "WorkGroup": "ServerlessAppFrontend-us-east-1-access-logs"
       },
       "Type": "AWS::Athena::NamedQuery"
@@ -3398,9 +3398,9 @@
       ],
       "Properties": {
         "Database": "serverlessappfrontend_us_east_1_access_logs",
-        "Description": "BLOCK actions grouped by client country",
+        "Description": "BLOCK actions grouped by client country (last 30 days)",
         "Name": "WAF CloudFront - Blocked by Country",
-        "QueryString": "SELECT httprequest.country, COUNT(*) AS block_count\nFROM waf_cloudfront_logs\nWHERE action = 'BLOCK'\nGROUP BY httprequest.country\nORDER BY block_count DESC\nLIMIT 25",
+        "QueryString": "SELECT httprequest.country, COUNT(*) AS block_count\nFROM waf_cloudfront_logs\nWHERE action = 'BLOCK'\n  AND log_time >= date_format(current_timestamp - interval '30' day, '%Y/%m/%d')\nGROUP BY httprequest.country\nORDER BY block_count DESC\nLIMIT 25",
         "WorkGroup": "ServerlessAppFrontend-us-east-1-access-logs"
       },
       "Type": "AWS::Athena::NamedQuery"
@@ -3411,9 +3411,9 @@
       ],
       "Properties": {
         "Database": "serverlessappfrontend_us_east_1_access_logs",
-        "Description": "Most recent BLOCK actions with client IP, country, URI, and terminating rule",
+        "Description": "Most recent BLOCK actions (last 30 days) with client IP, country, URI, and terminating rule",
         "Name": "WAF CloudFront - Recent Blocked Requests",
-        "QueryString": "SELECT from_unixtime(timestamp / 1000) AS request_time,\n       httprequest.clientip, httprequest.country, httprequest.uri,\n       terminatingruleid\nFROM waf_cloudfront_logs\nWHERE action = 'BLOCK'\nORDER BY timestamp DESC\nLIMIT 50",
+        "QueryString": "SELECT from_unixtime(timestamp / 1000) AS request_time,\n       httprequest.clientip, httprequest.country, httprequest.uri,\n       terminatingruleid\nFROM waf_cloudfront_logs\nWHERE action = 'BLOCK'\n  AND log_time >= date_format(current_timestamp - interval '30' day, '%Y/%m/%d')\nORDER BY timestamp DESC\nLIMIT 50",
         "WorkGroup": "ServerlessAppFrontend-us-east-1-access-logs"
       },
       "Type": "AWS::Athena::NamedQuery"
@@ -3424,9 +3424,9 @@
       ],
       "Properties": {
         "Database": "serverlessappfrontend_us_east_1_access_logs",
-        "Description": "Client IPs with the most BLOCK actions",
+        "Description": "Client IPs with the most BLOCK actions (last 30 days)",
         "Name": "WAF CloudFront - Top Blocked Client IPs",
-        "QueryString": "SELECT httprequest.clientip, httprequest.country, COUNT(*) AS block_count\nFROM waf_cloudfront_logs\nWHERE action = 'BLOCK'\nGROUP BY httprequest.clientip, httprequest.country\nORDER BY block_count DESC\nLIMIT 25",
+        "QueryString": "SELECT httprequest.clientip, httprequest.country, COUNT(*) AS block_count\nFROM waf_cloudfront_logs\nWHERE action = 'BLOCK'\n  AND log_time >= date_format(current_timestamp - interval '30' day, '%Y/%m/%d')\nGROUP BY httprequest.clientip, httprequest.country\nORDER BY block_count DESC\nLIMIT 25",
         "WorkGroup": "ServerlessAppFrontend-us-east-1-access-logs"
       },
       "Type": "AWS::Athena::NamedQuery"
@@ -3437,9 +3437,9 @@
       ],
       "Properties": {
         "Database": "serverlessappfrontend_us_east_1_access_logs",
-        "Description": "Which rules terminated the most requests",
+        "Description": "Which rules terminated the most requests (last 30 days)",
         "Name": "WAF CloudFront - Top Terminating Rules",
-        "QueryString": "SELECT terminatingruleid, action, COUNT(*) AS hit_count\nFROM waf_cloudfront_logs\nGROUP BY terminatingruleid, action\nORDER BY hit_count DESC\nLIMIT 25",
+        "QueryString": "SELECT terminatingruleid, action, COUNT(*) AS hit_count\nFROM waf_cloudfront_logs\nWHERE log_time >= date_format(current_timestamp - interval '30' day, '%Y/%m/%d')\nGROUP BY terminatingruleid, action\nORDER BY hit_count DESC\nLIMIT 25",
         "WorkGroup": "ServerlessAppFrontend-us-east-1-access-logs"
       },
       "Type": "AWS::Athena::NamedQuery"
@@ -3459,10 +3459,10 @@
           "Parameters": {
             "EXTERNAL": "TRUE",
             "projection.enabled": "true",
-            "projection.log_time.format": "yyyy/MM/dd/HH/mm",
+            "projection.log_time.format": "yyyy/MM/dd",
             "projection.log_time.interval": "1",
-            "projection.log_time.interval.unit": "minutes",
-            "projection.log_time.range": "2025/01/01/00/00,NOW",
+            "projection.log_time.interval.unit": "DAYS",
+            "projection.log_time.range": "NOW-90DAYS,NOW",
             "projection.log_time.type": "date",
             "storage.location.template": {
               "Fn::Join": [
@@ -3624,10 +3624,10 @@
           "Parameters": {
             "EXTERNAL": "TRUE",
             "projection.enabled": "true",
-            "projection.log_time.format": "yyyy/MM/dd/HH/mm",
+            "projection.log_time.format": "yyyy/MM/dd",
             "projection.log_time.interval": "1",
-            "projection.log_time.interval.unit": "minutes",
-            "projection.log_time.range": "2025/01/01/00/00,NOW",
+            "projection.log_time.interval.unit": "DAYS",
+            "projection.log_time.range": "NOW-90DAYS,NOW",
             "projection.log_time.type": "date",
             "storage.location.template": {
               "Fn::Join": [

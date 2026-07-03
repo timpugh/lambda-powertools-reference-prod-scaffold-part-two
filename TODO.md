@@ -40,7 +40,7 @@ The hard gates a fork needs to clear before customer traffic touches it. Most it
 
 **Threat detection gates:**
 
-- [ ] GuardDuty enabled at the account level (Lambda Protection in particular activates the backend CMK's `kms:Decrypt` grant — see README "GuardDuty has `kms:Decrypt` on the backend CMK")
+- [ ] GuardDuty enabled at the account level (note: GuardDuty's service-linked role is *deliberately denied* `kms:Decrypt` on the backend CMK — see README "GuardDuty … deliberately have NO `kms:Decrypt` on the backend CMK" for the live-verified rationale and the fork path if you want to allow it)
 - [ ] AWS Security Hub aggregator on, pulling Inspector / GuardDuty / IAM Access Analyzer findings into one ASFF stream
 
 **Already in place — no action required in a fork:**
@@ -49,7 +49,7 @@ The hard gates a fork needs to clear before customer traffic touches it. Most it
 - [x] cdk-nag with five compliance rule packs (AwsSolutions, Serverless, NIST 800-53 R5, HIPAA Security, PCI DSS 3.2.1) gating every `cdk synth`
 - [x] WAF with five managed rule sets + forwarded-IP rate limit, attached to CloudFront
 - [x] CloudTrail with object-level S3 data events on every audited bucket, log-file integrity validation, CMK-encrypted trail log files
-- [x] GuardDuty `kms:Decrypt` grant on the backend CMK (dormant until Lambda Protection is enabled in the account)
+- [x] Least-privilege CMK posture against account-wide inspection services: GuardDuty / DevOps Guru / Application Insights / Resource Explorer service-linked roles are denied `kms:Decrypt` on the backend CMK by design (a previous service-principal grant for GuardDuty was live-proven ineffective and removed — see README)
 - [x] Supply-chain hygiene: pip-audit + bandit + hash-pinned GitHub Actions + Dependabot grouped updates + `uv.lock` ↔ `lambda/requirements.txt` drift check in CI
 - [x] CDK synth runs against Stage-nested stacks (`'**'` glob) so cdk-nag actually evaluates the workload stacks, not just the App's direct children
 

@@ -115,29 +115,39 @@ _WAF_LOG_COLUMNS: tuple[tuple[str, str], ...] = (
 # templates (no f-string) with a __WAF_TABLE__ sentinel substituted per table via
 # str.replace — the table names are hardcoded literals, so there's no injection
 # surface; the static-template form also keeps the SQL-construction linter quiet.
+#
+# Every query filters on the log_time partition key (last 30 days, rendered in
+# the projection's yyyy/MM/dd format — Athena prunes projected partitions only
+# when the predicate string matches that format exactly). This is the query
+# half of the partition-projection contract with _create_waf_glue_table: the
+# filter is what turns projection into pruning, and per the Athena docs a
+# condition in any OTHER date format (dashes, DATE literals) silently disables
+# it. Keep the predicate and the table's projection.log_time.format in lockstep.
 # Each tuple: (construct-id suffix, display-name suffix, description, SQL template).
 _WAF_NAMED_QUERIES: tuple[tuple[str, str, str, str], ...] = (
     (
         "RecentBlocked",
         "Recent Blocked Requests",
-        "Most recent BLOCK actions with client IP, country, URI, and terminating rule",
+        "Most recent BLOCK actions (last 30 days) with client IP, country, URI, and terminating rule",
         """\
 SELECT from_unixtime(timestamp / 1000) AS request_time,
        httprequest.clientip, httprequest.country, httprequest.uri,
        terminatingruleid
 FROM __WAF_TABLE__
 WHERE action = 'BLOCK'
+  AND log_time >= date_format(current_timestamp - interval '30' day, '%Y/%m/%d')
 ORDER BY timestamp DESC
 LIMIT 50""",
     ),
     (
         "TopBlockedIps",
         "Top Blocked Client IPs",
-        "Client IPs with the most BLOCK actions",
+        "Client IPs with the most BLOCK actions (last 30 days)",
         """\
 SELECT httprequest.clientip, httprequest.country, COUNT(*) AS block_count
 FROM __WAF_TABLE__
 WHERE action = 'BLOCK'
+  AND log_time >= date_format(current_timestamp - interval '30' day, '%Y/%m/%d')
 GROUP BY httprequest.clientip, httprequest.country
 ORDER BY block_count DESC
 LIMIT 25""",
@@ -145,10 +155,11 @@ LIMIT 25""",
     (
         "TopRules",
         "Top Terminating Rules",
-        "Which rules terminated the most requests",
+        "Which rules terminated the most requests (last 30 days)",
         """\
 SELECT terminatingruleid, action, COUNT(*) AS hit_count
 FROM __WAF_TABLE__
+WHERE log_time >= date_format(current_timestamp - interval '30' day, '%Y/%m/%d')
 GROUP BY terminatingruleid, action
 ORDER BY hit_count DESC
 LIMIT 25""",
@@ -156,11 +167,12 @@ LIMIT 25""",
     (
         "ByCountry",
         "Blocked by Country",
-        "BLOCK actions grouped by client country",
+        "BLOCK actions grouped by client country (last 30 days)",
         """\
 SELECT httprequest.country, COUNT(*) AS block_count
 FROM __WAF_TABLE__
 WHERE action = 'BLOCK'
+  AND log_time >= date_format(current_timestamp - interval '30' day, '%Y/%m/%d')
 GROUP BY httprequest.country
 ORDER BY block_count DESC
 LIMIT 25""",
@@ -1403,11 +1415,27 @@ LIMIT 100""",
         """Create a partition-projected Glue table over a WAF S3 log location.
 
         ``location`` is the ``s3://…/{web-acl-name}/`` prefix (computed by the
-        Stage). Partition projection on a single ``log_time`` partition keyed to
-        WAF's ``yyyy/MM/dd/HH/mm`` path means Athena resolves partitions in-memory
-        — no crawler, no ``ALTER TABLE ADD PARTITION``. Schema + projection config
-        follow AWS's documented WAF Athena DDL; the openx JSON SerDe maps WAF's
-        camelCase keys to the lowercase columns case-insensitively.
+        Stage). Partition projection on a single ``log_time`` partition means
+        Athena resolves partitions in-memory — no crawler, no ``ALTER TABLE ADD
+        PARTITION``. Schema follows AWS's documented WAF Athena DDL; the openx
+        JSON SerDe maps WAF's camelCase keys to the lowercase columns
+        case-insensitively.
+
+        **Projection granularity is DAY, range NOW-90DAYS (don't widen either
+        casually).** WAF's key layout is ``…/{acl}/yyyy/MM/dd/HH/mm/``, but a
+        day-level partition prefix still matches the deeper hour/minute keys —
+        S3 listing is prefix-based — and AWS's documented WAF projection DDL
+        partitions by day for exactly this reason. Athena issues an S3 LIST per
+        projected partition a query's pruning leaves in scope, so granularity x
+        range is the real cost/latency knob: an earlier minute-granularity
+        config anchored at a fixed 2025 date projected ~800k partitions, and a
+        single unfiltered named query ran for 6+ minutes issuing an S3 LIST per
+        partition (found live). Day x the bucket's own 90-day lifecycle = at
+        most ~90 partitions, so even an unfiltered query stays fast — and the
+        relative NOW-90DAYS start never projects dates the lifecycle has
+        already expired. The named queries additionally filter on log_time
+        (see _WAF_NAMED_QUERIES) in the projection's exact date format, which
+        is what Athena requires for pruning.
         """
         table = glue.CfnTable(
             self,
@@ -1423,10 +1451,10 @@ LIMIT 100""",
                     "EXTERNAL": "TRUE",
                     "projection.enabled": "true",
                     "projection.log_time.type": "date",
-                    "projection.log_time.format": "yyyy/MM/dd/HH/mm",
+                    "projection.log_time.format": "yyyy/MM/dd",
                     "projection.log_time.interval": "1",
-                    "projection.log_time.interval.unit": "minutes",
-                    "projection.log_time.range": "2025/01/01/00/00,NOW",
+                    "projection.log_time.interval.unit": "DAYS",
+                    "projection.log_time.range": "NOW-90DAYS,NOW",
                     "storage.location.template": f"{location}${{log_time}}",
                 },
                 storage_descriptor=glue.CfnTable.StorageDescriptorProperty(
