@@ -1052,7 +1052,7 @@ A third documentation surface targets AI assistants: a generated knowledge base 
 
 - **For AI-assisted sessions**, add `.agents/summary/index.md` to context — its routing table and per-document summaries are enough for an assistant to decide which detail file to pull in (e.g., "why does synth exit 0 with nag findings?" → `architecture.md`; "which venv runs the OpenAPI generator?" → `dependencies.md`).
 - **Regenerate after *structural* changes** (new stacks, moved modules, changed gates), not routine code changes — the content is structural and stable. On regeneration, the **Custom Instructions** section of `AGENTS.md` is human/agent-maintained and must be carried over verbatim.
-- **Precedence on drift**: `CLAUDE.md` and this README are authoritative. When repository behavior changes, update them first, then patch the derived surfaces (`AGENTS.md`, `llms.txt`, `.agents/summary/`). Known gaps of the generated set are recorded in [.agents/summary/review_notes.md](.agents/summary/review_notes.md).
+- **Precedence on drift**: `CLAUDE.md` and this README are authoritative. When repository behavior changes, update them first, then patch the derived surfaces (`AGENTS.md`, `llms.txt`, the `.claude/skills/ship-a-change` skill, and `.agents/summary/`). Known gaps of the generated set are recorded in [.agents/summary/review_notes.md](.agents/summary/review_notes.md).
 
 ## Quality and security
 

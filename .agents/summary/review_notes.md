@@ -24,7 +24,7 @@ Areas covered in depth: infrastructure modules (all docstrings + full reads of t
 Areas documented at lower resolution (acceptable gaps, listed for transparency):
 
 1. **`infrastructure/backend_app.py` and `infrastructure/frontend_stack.py` interior wiring** — these two modules were read via docstrings, method signatures, and targeted greps (runtime, architecture, concurrency verified) rather than line-by-line. Fine-grained facts (exact throttling numbers, individual suppression rationales, RUM session-sampling config) should be read from source when needed.
-2. **GitHub workflows other than `ci.yml`** (`codeql.yml`, `scorecard.yml`, `dependency-audit.yml`, `dependabot-auto-merge.yml`, `docs.yml`, `release.yml`, `pr-title.yml`) — summarized from names and cross-references in README/Makefile comments, not read in full.
+2. **GitHub workflows other than `ci.yml`** — *(closed 2026-07-06)*: all seven were subsequently read in full; the components.md summaries were confirmed accurate and enriched with the verified specifics (auto-merge scope is patch/minor across all three ecosystems, the dependency audit covers each uv group plus npm in independent lanes).
 3. **`frontend/index.html`** — verified to contain the RUM client bootstrap (config from `/config.json`) and the `GET /greeting` fetch, but the inline JavaScript was not exhaustively documented. No build step exists.
 4. **Zensical site content** (`docs/*.md`, `zensical.toml` nav) — the docs pipeline is documented; individual published pages are not summarized (they are mkdocstrings renderings of module docstrings already covered).
 5. **`tests/cdk/test_stacks.py` and `test_snapshots.py` internals** — suite purposes documented; individual assertions not enumerated.
