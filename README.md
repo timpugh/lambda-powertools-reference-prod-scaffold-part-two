@@ -1046,6 +1046,14 @@ make docs-open   # build + open site/index.html
 make docs-serve  # dev server with hot reload
 ```
 
+#### Generated codebase knowledge base (for AI-assisted work)
+
+A third documentation surface targets AI assistants: a generated knowledge base in [.agents/summary/](.agents/summary/index.md) (architecture, components, interfaces, data models, workflows, dependencies — with a routing index), consolidated into [AGENTS.md](AGENTS.md) (condensed navigation + hard rules for agents) and [CONTRIBUTING.md](CONTRIBUTING.md) (contributor onboarding). Using and maintaining it:
+
+- **For AI-assisted sessions**, add `.agents/summary/index.md` to context — its routing table and per-document summaries are enough for an assistant to decide which detail file to pull in (e.g., "why does synth exit 0 with nag findings?" → `architecture.md`; "which venv runs the OpenAPI generator?" → `dependencies.md`).
+- **Regenerate after *structural* changes** (new stacks, moved modules, changed gates), not routine code changes — the content is structural and stable. On regeneration, the **Custom Instructions** section of `AGENTS.md` is human/agent-maintained and must be carried over verbatim.
+- **Precedence on drift**: `CLAUDE.md` and this README are authoritative. When repository behavior changes, update them first, then patch the derived surfaces (`AGENTS.md`, `llms.txt`, `.agents/summary/`). Known gaps of the generated set are recorded in [.agents/summary/review_notes.md](.agents/summary/review_notes.md).
+
 ## Quality and security
 
 ### Tests
