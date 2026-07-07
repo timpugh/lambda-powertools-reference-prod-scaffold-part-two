@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.2] - 2026-07-07
+
+### Documentation
+
+- Correct retry-count comment to match total_max_attempts=2
+
+### Fixed
+
+- Bound the retry budget for two idempotency DynamoDB writes (#116)
+
 ## [3.0.1] - 2026-07-07
 
 ### Build
@@ -28,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Align toolchain to Python 3.14 and correct PITR-window wording
+
+### Maintenance
+
+- Release v3.0.1
 
 ## [3.0.0] - 2026-07-03
 
@@ -427,6 +441,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add error case unit tests for SSM failure, unknown route, and unsupported method
 - Separate CDK tests from unit tests so cdk-check CI job stops failing
 
+[3.0.2]: https://github.com/timpugh/lambda-powertools-reference/compare/v3.0.1..v3.0.2
 [3.0.1]: https://github.com/timpugh/lambda-powertools-reference/compare/v3.0.0..v3.0.1
 [3.0.0]: https://github.com/timpugh/lambda-powertools-reference/compare/v2.1.0..v3.0.0
 [2.1.0]: https://github.com/timpugh/lambda-powertools-reference/compare/v2.0.3..v2.1.0
