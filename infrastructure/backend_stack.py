@@ -38,6 +38,7 @@ class BackendStack(Stack):
         idempotency_table: dynamodb.ITableV2,
         is_production_env: bool = True,
         appconfig_monitor: bool = False,
+        ssm_param_path: str | None = None,
         **kwargs: Any,
     ) -> None:
         """Compose the application construct into a deployable stack.
@@ -58,6 +59,10 @@ class BackendStack(Stack):
                 carries an alarm rollback monitor. Defaults to False (all-at-once,
                 no monitor) so a cold/first deploy always succeeds; see
                 :meth:`BackendApp._attach_appconfig_rollback_monitor`.
+            ssm_param_path: Forwarded to :class:`BackendApp` — optional override
+                for the greeting SSM parameter's name. Defaults to None, which
+                keeps CDK's auto-generated name. Set before first deploy;
+                changing it afterwards replaces the parameter.
             **kwargs: Additional keyword arguments passed to the parent Stack.
         """
         super().__init__(scope, construct_id, **kwargs)
@@ -70,6 +75,7 @@ class BackendStack(Stack):
             idempotency_table=idempotency_table,
             is_production_env=is_production_env,
             appconfig_monitor=appconfig_monitor,
+            ssm_param_path=ssm_param_path,
         )
 
         # Expose API URL + ID for consumption by the frontend stack (api_id lets the

@@ -37,6 +37,14 @@ to ``false`` (all-at-once flag deployment, no monitor) so the cold/first deploy
 always succeeds; enable it only after a first deploy to get a gradual rollout with
 alarm-driven auto-rollback for ongoing flag changes (see README "Deployment safety").
 
+The greeting SSM parameter's name is optionally overridden by the
+``ssm_param_path`` CDK context key (``-c ssm_param_path=/org/app/greeting``). It
+defaults to ``None``, which keeps CDK's auto-generated name (the Lambda reads
+whichever name is live via the ``GREETING_PARAM_NAME`` env var either way).
+**Caution:** set it before the first deploy, or accept parameter replacement —
+changing ``parameter_name`` on a deployed stack replaces the parameter and
+resets its value to "hello world".
+
 The deployment environment is controlled by the ``env`` CDK context key,
 falling back to the ``ENVIRONMENT`` variable, defaulting to ``prod``.
 ``prod`` keeps the un-suffixed stack names above (so the long-lived
@@ -62,7 +70,13 @@ import os
 
 import aws_cdk as cdk
 
-from infrastructure.app_stage import DEFAULT_ENV_NAME, AppStage, parse_context_flag, stage_id
+from infrastructure.app_stage import (
+    DEFAULT_ENV_NAME,
+    AppStage,
+    parse_context_flag,
+    stage_id,
+    validate_ssm_param_path,
+)
 from infrastructure.nag_utils import attach_nag_packs
 
 app = cdk.App()
@@ -101,6 +115,10 @@ retain_data: bool = parse_context_flag(app.node.try_get_context("retain_data"), 
 # produced metric data, to protect ongoing flag changes.
 appconfig_monitor: bool = parse_context_flag(app.node.try_get_context("appconfig_monitor"), "appconfig_monitor")
 
+# Optional SSM path override for the greeting parameter (`-c ssm_param_path=/my/app/greeting`).
+# Default None keeps CDK's auto-generated name; validated at synth (fail-loud like retain_data).
+ssm_param_path: str | None = validate_ssm_param_path(app.node.try_get_context("ssm_param_path"))
+
 # Stage id composition lives next to the Stage (app_stage.stage_id):
 # prod keeps the legacy id so existing cdk.out assembly paths and tooling
 # keyed on the stage name stay stable; other envs get their own id.
@@ -111,6 +129,7 @@ AppStage(
     env_name=env_name,
     retain_data=retain_data,
     appconfig_monitor=appconfig_monitor,
+    ssm_param_path=ssm_param_path,
 )
 
 app.synth()

@@ -103,6 +103,7 @@ class BackendApp(Construct):
         idempotency_table: dynamodb.ITableV2,
         is_production_env: bool = True,
         appconfig_monitor: bool = False,
+        ssm_param_path: str | None = None,
     ) -> None:
         """Build the application construct.
 
@@ -131,6 +132,14 @@ class BackendApp(Construct):
                 ``INSUFFICIENT_DATA``, which AppConfig treats as a rollback signal).
                 Enable it only AFTER a first all-at-once deploy has produced metric
                 data; see that method and README "Deployment safety".
+            ssm_param_path: Optional override for the greeting SSM parameter's
+                name (``-c ssm_param_path=/org/app/greeting``). Defaults to None,
+                which keeps CDK's auto-generated name — the Lambda reads whichever
+                name is live via the ``GREETING_PARAM_NAME`` env var either way, so
+                this is purely cosmetic unless a fork wants a predictable path.
+                **Caution:** set it before the first deploy, or accept parameter
+                replacement (changing ``parameter_name`` on a deployed stack
+                replaces the parameter and re-creates its value as "hello world").
         """
         super().__init__(scope, construct_id)
 
@@ -193,12 +202,13 @@ class BackendApp(Construct):
         # is why this template doesn't ship it.
 
         # SSM parameter for Powertools Parameters.
-        # parameter_name omitted so CDK auto-generates. Lambda reads the value
-        # through the GREETING_PARAM_NAME env var, so the name doesn't need to
-        # be human-memorable.
+        # None keeps CDK auto-naming (the default; Lambda reads the name via
+        # GREETING_PARAM_NAME either way). A fork sets -c ssm_param_path=/org/app/greeting
+        # to slot the parameter into its own SSM hierarchy.
         self.greeting_param = ssm.StringParameter(
             self,
             "GreetingParameter",
+            parameter_name=ssm_param_path,
             string_value="hello world",
         )
 

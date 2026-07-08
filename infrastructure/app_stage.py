@@ -103,6 +103,32 @@ def parse_context_flag(raw: object, key: str) -> bool:
     )
 
 
+# SSM parameter paths: slash-anchored hierarchy, no trailing slash. SSM itself
+# allows [a-zA-Z0-9_.-/]; the anchor keeps `-c ssm_param_path=greeting` (no
+# leading /) from silently creating a non-hierarchical parameter.
+_SSM_PARAM_PATH_RE = re.compile(r"^(/[a-zA-Z0-9_.-]+)+$")
+
+
+def validate_ssm_param_path(raw: str | None) -> str | None:
+    """Validate the optional `ssm_param_path` context override at synth time.
+
+    ``None`` (context key absent) means "keep CDK's auto-generated parameter
+    name" — the default that leaves existing deployments untouched. Anything
+    else must be a well-formed hierarchical SSM path; failing synth loudly
+    beats an opaque CloudFormation validation error at deploy (the same
+    rationale as :func:`validate_env_name`).
+    """
+    if raw is None:
+        return None
+    if not _SSM_PARAM_PATH_RE.match(raw):
+        raise ValueError(
+            f"Invalid value for CDK context key 'ssm_param_path': {raw!r}. "
+            "Use a slash-anchored SSM path like /serverless-app/greeting "
+            "(chars [a-zA-Z0-9_.-] per segment, no trailing slash)."
+        )
+    return raw
+
+
 def stage_id(env_name: str, region: str) -> str:
     """Compose the Stage construct id for an environment + region pair.
 
@@ -155,6 +181,15 @@ class AppStage(cdk.Stage):
     monitored CFN-managed deployment cannot create a cold stack — see
     :meth:`BackendApp._attach_appconfig_rollback_monitor`. Set it via
     ``-c appconfig_monitor=true`` only AFTER a first all-at-once deploy.
+
+    ``ssm_param_path`` optionally overrides the auto-generated name of the
+    greeting SSM parameter. ``None`` (the default) leaves CDK's auto-naming
+    untouched — the Lambda reads whichever name is live via the
+    ``GREETING_PARAM_NAME`` env var either way, so this is purely cosmetic
+    unless a fork wants the parameter at a specific, predictable path. Set it
+    via ``-c ssm_param_path=/org/app/greeting`` before the first deploy:
+    changing it afterwards replaces the parameter (the value resets to
+    ``"hello world"``).
     """
 
     def __init__(
@@ -166,11 +201,13 @@ class AppStage(cdk.Stage):
         env_name: str = DEFAULT_ENV_NAME,
         retain_data: bool = False,
         appconfig_monitor: bool = False,
+        ssm_param_path: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
         validate_env_name(env_name)
+        validate_ssm_param_path(ssm_param_path)
         is_production_env = env_name == DEFAULT_ENV_NAME
 
         # prod keeps the legacy names (no env segment) so the long-lived
@@ -225,6 +262,7 @@ class AppStage(cdk.Stage):
             idempotency_table=self.data.idempotency_table,
             is_production_env=is_production_env,
             appconfig_monitor=appconfig_monitor,
+            ssm_param_path=ssm_param_path,
             env=target_env,
             tags=stack_tags,
         )
