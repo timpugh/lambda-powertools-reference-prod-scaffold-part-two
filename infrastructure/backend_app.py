@@ -742,8 +742,12 @@ class BackendApp(Construct):
         monitoring.monitor_lambda_function(
             lambda_function=self.function,
             add_latency_p90_alarm={"p90": LatencyThreshold(max_latency=Duration.seconds(3))},
-            # 5% of invocations erroring is systematic failure, not a cold-start
-            # blip — reference value, size to real traffic in a fork.
+            # Despite the "rate" name, the facade's default rate computation alarms on
+            # the raw Errors metric (Average per 5-min period, threshold 5) — NOT a
+            # percentage of invocations. Sustained errors above that is systematic
+            # failure, not a cold-start blip. Reference value — size to real traffic in
+            # a fork (a true percentage needs custom metric math dividing Errors by
+            # Invocations — rate_computation_method only offers per-time rates).
             add_fault_rate_alarm={"error": ErrorRateThreshold(max_error_rate=5)},
         )
         # Surfaces recent ERROR-level records next to the Lambda metrics so an
@@ -769,11 +773,10 @@ class BackendApp(Construct):
             table=self.idempotency_table,
             # Any sustained throttling on the idempotency table delays every
             # request (two serial writes per request ride the handler's bounded
-            # retry budget) — the tightest threshold the facade emits
-            # (GreaterThanThreshold 1) pages on more than one throttled event
-            # per period. These kwargs take ThrottledEventsThreshold (verified
-            # against the installed cdk-monitoring-constructs signature), not
-            # ErrorCountThreshold.
+            # retry budget) — fires at more than 1 throttled event per period
+            # (GreaterThanThreshold 1); set 0 to page on any single throttle.
+            # These kwargs take ThrottledEventsThreshold (verified against the
+            # installed cdk-monitoring-constructs signature), not ErrorCountThreshold.
             add_read_throttled_events_count_alarm={
                 "critical": ThrottledEventsThreshold(max_throttled_events_threshold=1)
             },
