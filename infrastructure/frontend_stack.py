@@ -193,10 +193,10 @@ LIMIT 25""",
 class FrontendStack(Stack):
     """CDK stack for the Serverless App frontend.
 
-    Provisions a private S3 bucket for static assets and a CloudFront
-    distribution with OAC, HTTPS-only enforcement, and security response
-    headers. WAF protection is provided by a WebACL ARN passed in from
-    WafStack, which is always deployed in us-east-1.
+    Provisions a private S3 bucket for static assets and a CloudFront distribution with OAC, HTTPS-only enforcement, and
+    security response headers. WAF protection is provided by a WebACL ARN passed in from WafStack, which is always
+    deployed in us-east-1. The distribution also proxies `/api/*` same-origin to the backend API Gateway, injecting the
+    origin-verify header the regional WAF requires (see `_build_api_origin_behavior`).
 
     This stack can be deployed to any region. When the target region differs
     from us-east-1, CDK bridges the WAF ARN cross-region automatically via

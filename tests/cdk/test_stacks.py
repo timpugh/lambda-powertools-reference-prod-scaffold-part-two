@@ -1143,6 +1143,11 @@ class TestFrontendStack:
                                             "CachePolicyId": "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
                                             "OriginRequestPolicyId": "b689b0a8-53d0-40ab-baf2-68738e2966ac",
                                             "ViewerProtocolPolicy": "https-only",
+                                            # The /api path-rewrite CloudFront Function must be wired
+                                            # as a viewer-request association, not just declared.
+                                            "FunctionAssociations": Match.array_with(
+                                                [Match.object_like({"EventType": "viewer-request"})]
+                                            ),
                                         }
                                     )
                                 ]
