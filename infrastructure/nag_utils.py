@@ -270,6 +270,32 @@ def grant_cloudwatch_alarms_to_key(key: kms.Key, *, account: str, region: str) -
     )
 
 
+def grant_budgets_to_key(key: kms.Key, *, account: str, region: str) -> None:
+    """Grant AWS Budgets the KMS operations to publish to a CMK-encrypted SNS topic.
+
+    Same shape and caveats as :func:`grant_cloudwatch_alarms_to_key` — Budgets
+    publishes via SNS as its service principal, so it needs Decrypt +
+    GenerateDataKey* through sns.{region}; aws:SourceArn is deliberately
+    omitted (not documented for the via-SNS KMS call; an unmatched required
+    condition would silently drop the notification). Verify delivery on a live
+    deploy when touching this statement.
+    """
+    key.add_to_resource_policy(
+        iam.PolicyStatement(
+            sid="AllowBudgetsViaSns",
+            actions=["kms:Decrypt", "kms:GenerateDataKey*"],
+            principals=[iam.ServicePrincipal("budgets.amazonaws.com")],
+            resources=["*"],
+            conditions={
+                "StringEquals": {
+                    "aws:SourceAccount": account,
+                    "kms:ViaService": f"sns.{region}.amazonaws.com",
+                },
+            },
+        )
+    )
+
+
 def route_operational_alarm(alarm: cloudwatch.Alarm, topic: sns.ITopic | None) -> None:
     """Wire an operational alarm to the environment's paging posture.
 

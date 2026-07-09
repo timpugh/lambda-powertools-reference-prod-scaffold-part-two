@@ -752,6 +752,31 @@ class TestBackendStack:
             "non-prod must keep its alarms (just without SNS routing)"
         )
 
+    def test_cloudwatch_spend_budget_notifies_alarm_topic(self, backend_template: Template) -> None:
+        # RUM has no server-side ingestion cap (public guest pool by design), so a
+        # spend budget is the backstop (TODO "Bound RUM ingestion cost").
+        budgets_found = backend_template.find_resources("AWS::Budgets::Budget")
+        assert len(budgets_found) == 1
+        budget = next(iter(budgets_found.values()))["Properties"]
+        subs = budget["NotificationsWithSubscribers"][0]["Subscribers"]
+        assert subs[0]["SubscriptionType"] == "SNS"
+
+    def test_non_production_env_has_no_budget(self) -> None:
+        # Budgets are account-global cost backstops with no per-environment
+        # value — ephemeral/dev stacks (no alarm topic to notify) must not
+        # create one.
+        app = cdk.App(context=_NO_BUNDLING)
+        data = DataStack(app, "TestDevBackendBudgetData", env=_TEST_ENV)
+        stack = BackendStack(
+            app,
+            "TestDevBackendBudgetStack",
+            idempotency_table=data.idempotency_table,
+            is_production_env=False,
+            env=_TEST_ENV,
+        )
+        template = Template.from_stack(stack)
+        template.resource_count_is("AWS::Budgets::Budget", 0)
+
     def test_appconfig_flags_are_deployed_to_environment(self, backend_template: Template) -> None:
         # A hosted configuration version alone is never served: the AppConfig
         # data plane (GetLatestConfiguration) only returns *deployed* config.

@@ -31,6 +31,9 @@ from aws_cdk import (
     aws_applicationinsights as appinsights,
 )
 from aws_cdk import (
+    aws_budgets as budgets,
+)
+from aws_cdk import (
     aws_cloudwatch as cloudwatch,
 )
 from aws_cdk import (
@@ -84,6 +87,7 @@ from infrastructure.nag_utils import (
     build_managed_threat_rules,
     create_auto_delete_objects_log_group,
     create_waf_logs_bucket,
+    grant_budgets_to_key,
     grant_cloudwatch_alarms_to_key,
     grant_logs_service_to_key,
     route_operational_alarm,
@@ -702,6 +706,11 @@ class BackendApp(Construct):
         # so the prod alarm topic exists to route to.
         self._attach_waf_alarms(cf_web_acl_metric_name)
 
+        # Prod-only cost backstop for RUM's uncapped ingestion — needs the alarm
+        # topic to notify, so only attached where one exists.
+        if self.alarm_topic is not None:
+            self._attach_cloudwatch_spend_budget(self.alarm_topic)
+
         # Expose API URL for consumption by the enclosing stack and cross-stack refs
         self.api_url = self.api.url
 
@@ -883,6 +892,19 @@ class BackendApp(Construct):
                 },
             )
         )
+        # AWS Budgets publishes the CloudWatch-spend notification to this same topic
+        # (see _attach_cloudwatch_spend_budget). Confused-deputy guard per the Budgets
+        # SNS docs: SourceAccount pins the caller's account.
+        grant_budgets_to_key(self.encryption_key, account=stack.account, region=stack.region)
+        topic.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="AllowBudgetsPublish",
+                actions=["sns:Publish"],
+                principals=[iam.ServicePrincipal("budgets.amazonaws.com")],
+                resources=[topic.topic_arn],
+                conditions={"StringEquals": {"aws:SourceAccount": stack.account}},
+            )
+        )
         return topic
 
     def _attach_waf_alarms(self, cf_web_acl_metric_name: str | None) -> None:
@@ -938,6 +960,51 @@ class BackendApp(Construct):
                 # metrics reference), and they only publish in us-east-1 anyway.
                 {"WebACL": cf_web_acl_metric_name, "Rule": "ALL"},
             )
+
+    def _attach_cloudwatch_spend_budget(self, topic: sns.Topic) -> None:
+        """Monthly cost budget over the CloudWatch service (RUM bills under it).
+
+        RUM's guest identity pool is necessarily public, ingestion is billed
+        per-event with no server-side cap, and session_sample_rate is a
+        client-side knob an abuser ignores — so spend is the authoritative abuse
+        signal (TODO "Bound RUM ingestion cost"). Budgets are account-global;
+        prod-only (the caller gates on the topic) and stack-named so multiple
+        deployments never collide. $10/month is a reference limit for a
+        sample-app baseline near $0 — an 80% actual-spend breach means something
+        changed; size it to real traffic in a fork.
+        """
+        stack = Stack.of(self)
+        budgets.CfnBudget(
+            self,
+            "CloudWatchSpendBudget",
+            budget=budgets.CfnBudget.BudgetDataProperty(
+                budget_name=f"{stack.stack_name}-cloudwatch-spend",
+                budget_type="COST",
+                time_unit="MONTHLY",
+                budget_limit=budgets.CfnBudget.SpendProperty(amount=10, unit="USD"),
+                # Cost Explorer / CUR SERVICE dimension value for CloudWatch is
+                # "AmazonCloudWatch" (no space) — NOT the AWS console display
+                # name "Amazon CloudWatch". Getting this wrong fails SILENTLY:
+                # the budget still synths and deploys, it just tracks $0 forever
+                # (no CloudFormation drift, no error anywhere). Verify on a live
+                # deploy that the budget's current/actual spend becomes non-zero
+                # once CloudWatch charges accrue.
+                cost_filters={"Service": ["AmazonCloudWatch"]},
+            ),
+            notifications_with_subscribers=[
+                budgets.CfnBudget.NotificationWithSubscribersProperty(
+                    notification=budgets.CfnBudget.NotificationProperty(
+                        notification_type="ACTUAL",
+                        comparison_operator="GREATER_THAN",
+                        threshold=80,
+                        threshold_type="PERCENTAGE",
+                    ),
+                    subscribers=[
+                        budgets.CfnBudget.SubscriberProperty(subscription_type="SNS", address=topic.topic_arn)
+                    ],
+                )
+            ],
+        )
 
     def _attach_regional_waf(self) -> None:
         """Attach a REGIONAL WAF WebACL to the API Gateway stage.

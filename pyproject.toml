@@ -227,7 +227,7 @@ max-args = 8         # max parameters per function
 max-locals = 32      # max local variables per function (CDK stacks legitimately have many — frontend __init__ wires ~31 after the audit-pass additions)
 max-returns = 6      # max return statements per function
 max-branches = 12    # max branches (if/for/while/try) per function
-max-statements = 55  # max statements per function body — frontend __init__ runs ~52 after the audit-pass additions
+max-statements = 56  # max statements per function body — backend __init__ runs 56 after the CloudWatch spend budget wiring
 max-attributes = 10  # max instance attributes per class
 
 # =============================================================================

@@ -877,6 +877,24 @@
                 "Ref": "AppAlarmTopicAD260C2E"
               },
               "Sid": "AllowCloudWatchAlarmsPublish"
+            },
+            {
+              "Action": "sns:Publish",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                }
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "budgets.amazonaws.com"
+              },
+              "Resource": {
+                "Ref": "AppAlarmTopicAD260C2E"
+              },
+              "Sid": "AllowBudgetsPublish"
             }
           ],
           "Version": "2012-10-17"
@@ -3006,6 +3024,89 @@
       },
       "Type": "AWS::CloudWatch::Alarm"
     },
+    "AppCloudWatchSpendBudgetAE22D1EF": {
+      "Metadata": {
+        "cdk_nag": {
+          "rules_to_suppress": [
+            {
+              "id": "AwsSolutions-APIG2",
+              "reason": "Request validation not needed for sample app"
+            },
+            {
+              "id": "AwsSolutions-APIG4",
+              "reason": "Authorization not needed for sample app"
+            },
+            {
+              "id": "AwsSolutions-COG4",
+              "reason": "Cognito authorizer not needed for sample app"
+            },
+            {
+              "id": "CdkNagValidationFailure",
+              "reason": "Serverless-APIGWStructuredLogging validation fails due to intrinsic function reference in access log destination \u2014 structured JSON logging is configured via logging_format=JSON on the Lambda"
+            },
+            {
+              "id": "NIST.800.53.R5-APIGWSSLEnabled",
+              "reason": "Client-side SSL certificates not required for sample app"
+            },
+            {
+              "id": "NIST.800.53.R5-APIGWCacheEnabledAndEncrypted",
+              "reason": "API Gateway cache cluster intentionally disabled for cost reasons \u2014 the smallest 0.5 GB cluster is ~$14/month for a sample app. Caching GET /greeting would also serve stale values across SSM parameter and AppConfig feature-flag changes."
+            },
+            {
+              "id": "HIPAA.Security-APIGWSSLEnabled",
+              "reason": "Client-side SSL certificates not required for sample app"
+            },
+            {
+              "id": "HIPAA.Security-APIGWCacheEnabledAndEncrypted",
+              "reason": "API Gateway cache cluster intentionally disabled for cost reasons \u2014 see NIST.800.53.R5-APIGWCacheEnabledAndEncrypted rationale above."
+            },
+            {
+              "id": "PCI.DSS.321-APIGWSSLEnabled",
+              "reason": "Client-side SSL certificates not required for sample app"
+            },
+            {
+              "id": "PCI.DSS.321-APIGWCacheEnabledAndEncrypted",
+              "reason": "API Gateway cache cluster intentionally disabled for cost reasons \u2014 see NIST.800.53.R5-APIGWCacheEnabledAndEncrypted rationale above."
+            }
+          ]
+        }
+      },
+      "Properties": {
+        "Budget": {
+          "BudgetLimit": {
+            "Amount": 10,
+            "Unit": "USD"
+          },
+          "BudgetName": "ServerlessAppBackend-us-east-1-cloudwatch-spend",
+          "BudgetType": "COST",
+          "CostFilters": {
+            "Service": [
+              "AmazonCloudWatch"
+            ]
+          },
+          "TimeUnit": "MONTHLY"
+        },
+        "NotificationsWithSubscribers": [
+          {
+            "Notification": {
+              "ComparisonOperator": "GREATER_THAN",
+              "NotificationType": "ACTUAL",
+              "Threshold": 80,
+              "ThresholdType": "PERCENTAGE"
+            },
+            "Subscribers": [
+              {
+                "Address": {
+                  "Ref": "AppAlarmTopicAD260C2E"
+                },
+                "SubscriptionType": "SNS"
+              }
+            ]
+          }
+        ]
+      },
+      "Type": "AWS::Budgets::Budget"
+    },
     "AppEncryptionKey7F644894": {
       "DeletionPolicy": "Delete",
       "Metadata": {
@@ -3135,6 +3236,26 @@
               },
               "Resource": "*",
               "Sid": "AllowCloudWatchAlarmsViaSns"
+            },
+            {
+              "Action": [
+                "kms:Decrypt",
+                "kms:GenerateDataKey*"
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  },
+                  "kms:ViaService": "sns.us-east-1.amazonaws.com"
+                }
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "budgets.amazonaws.com"
+              },
+              "Resource": "*",
+              "Sid": "AllowBudgetsViaSns"
             }
           ],
           "Version": "2012-10-17"
