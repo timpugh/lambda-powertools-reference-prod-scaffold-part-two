@@ -60,13 +60,16 @@ class TestFrontend:
         assert "text/html" in response.headers.get("Content-Type", "")
 
     def test_config_json_contains_api_url(self, cloudfront_url):
-        """config.json is generated at deploy time with the injected API Gateway URL."""
+        """config.json is generated at deploy time with the same-origin API path.
+
+        The API is same-origin behind CloudFront now, so the injected value is
+        a relative path (`/api`), not an absolute execute-api URL.
+        """
         response = requests.get(f"{cloudfront_url}/config.json", timeout=15)
 
         assert response.status_code == 200
         data = response.json()
-        assert "apiUrl" in data
-        assert data["apiUrl"].startswith("https://")
+        assert data["apiUrl"] == "/api"
 
     def test_distribution_url_is_https(self, cloudfront_url):
         """The CloudFront domain name output should already be an HTTPS URL."""
