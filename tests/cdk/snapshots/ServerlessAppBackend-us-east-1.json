@@ -2035,6 +2035,11 @@
             "SingleHeader": {
               "Name": "cookie"
             }
+          },
+          {
+            "SingleHeader": {
+              "Name": "x-origin-verify"
+            }
           }
         ],
         "ResourceArn": {
@@ -4739,15 +4744,15 @@
           "rules_to_suppress": [
             {
               "id": "AwsSolutions-SMG4",
-              "reason": "No automatic rotation by design: rotating requires updating the CFN-managed CloudFront origin header and WAF rule together \u2014 a rotation Lambda would mutate both out-of-band (drift). Manual rotation: put a new secret value, then redeploy (both consumers resolve it via CFN dynamic references)."
+              "reason": "No rotation Lambda by design (it would mutate the CFN-managed CloudFront origin header and WAF rule out-of-band, as drift): rotation happens by replacing the Secret resource (new construct id, new ARN), which atomically re-points both consumers' dynamic references in one deploy."
             },
             {
               "id": "NIST.800.53.R5-SecretsManagerRotationEnabled",
-              "reason": "No automatic rotation by design: rotating requires updating the CFN-managed CloudFront origin header and WAF rule together \u2014 a rotation Lambda would mutate both out-of-band (drift). Manual rotation: put a new secret value, then redeploy (both consumers resolve it via CFN dynamic references)."
+              "reason": "No rotation Lambda by design (it would mutate the CFN-managed CloudFront origin header and WAF rule out-of-band, as drift): rotation happens by replacing the Secret resource (new construct id, new ARN), which atomically re-points both consumers' dynamic references in one deploy."
             },
             {
               "id": "HIPAA.Security-SecretsManagerRotationEnabled",
-              "reason": "No automatic rotation by design: rotating requires updating the CFN-managed CloudFront origin header and WAF rule together \u2014 a rotation Lambda would mutate both out-of-band (drift). Manual rotation: put a new secret value, then redeploy (both consumers resolve it via CFN dynamic references)."
+              "reason": "No rotation Lambda by design (it would mutate the CFN-managed CloudFront origin header and WAF rule out-of-band, as drift): rotation happens by replacing the Secret resource (new construct id, new ARN), which atomically re-points both consumers' dynamic references in one deploy."
             },
             {
               "id": "AwsSolutions-APIG4",

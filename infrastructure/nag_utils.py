@@ -386,12 +386,23 @@ def waf_log_redacted_fields() -> list[wafv2.CfnLoggingConfiguration.FieldToMatch
     WAF logs carry full request headers by default; if the API ever accepts an
     Authorization header or a session cookie, it must not land in the
     aws-waf-logs-* buckets unredacted (TODO "WAF logging — redacted_fields").
+
+    x-origin-verify is the CloudFront->origin secret the REGIONAL ACL's
+    RejectNonCloudFront rule byte-matches — every request that ACL logs
+    (managed-rule blocks, sampled requests) carries it, and the secret must
+    never land in the 90-day-retained log buckets. Redacting it on the
+    CloudFront ACL too is deliberate: viewers can send a spoofed
+    x-origin-verify header to CloudFront, and while a spoofed value isn't the
+    secret, redacting uniformly costs nothing and keeps the two ACLs'
+    redaction lists identical by construction.
+
     A function (not a module constant) so each CfnLoggingConfiguration gets its
     own property instances.
     """
     return [
         wafv2.CfnLoggingConfiguration.FieldToMatchProperty(single_header={"Name": "authorization"}),
         wafv2.CfnLoggingConfiguration.FieldToMatchProperty(single_header={"Name": "cookie"}),
+        wafv2.CfnLoggingConfiguration.FieldToMatchProperty(single_header={"Name": "x-origin-verify"}),
     ]
 
 
@@ -399,6 +410,7 @@ def waf_log_redacted_fields() -> list[wafv2.CfnLoggingConfiguration.FieldToMatch
 # with threat traffic, not with legitimate traffic (TODO "logging_filter").
 # Traffic analytics stay available via the CloudFront/S3 access-log tables;
 # the WAF Athena queries analyze blocked traffic and are unaffected.
+# Do not mutate — shared by both WebACLs' logging configs.
 WAF_LOG_DROP_ALLOW_FILTER: dict[str, object] = {
     "DefaultBehavior": "KEEP",
     "Filters": [

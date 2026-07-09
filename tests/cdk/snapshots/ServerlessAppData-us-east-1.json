@@ -52,11 +52,11 @@
           "rules_to_suppress": [
             {
               "id": "NIST.800.53.R5-DynamoDBInBackupPlan",
-              "reason": "AWS Backup plan not configured for sample app \u2014 PITR is enabled for point-in-time recovery"
+              "reason": "Destroy-friendly default \u2014 PITR covers the regenerable idempotency cache; retain_data=true adds the AWS Backup plan"
             },
             {
               "id": "HIPAA.Security-DynamoDBInBackupPlan",
-              "reason": "AWS Backup plan not configured for sample app \u2014 PITR is enabled for point-in-time recovery"
+              "reason": "Destroy-friendly default \u2014 PITR covers the regenerable idempotency cache; retain_data=true adds the AWS Backup plan"
             }
           ]
         }
@@ -104,11 +104,11 @@
           "rules_to_suppress": [
             {
               "id": "NIST.800.53.R5-DynamoDBInBackupPlan",
-              "reason": "AWS Backup plan not configured for sample app \u2014 PITR is enabled for point-in-time recovery"
+              "reason": "Destroy-friendly default \u2014 PITR covers the regenerable idempotency cache; retain_data=true adds the AWS Backup plan"
             },
             {
               "id": "HIPAA.Security-DynamoDBInBackupPlan",
-              "reason": "AWS Backup plan not configured for sample app \u2014 PITR is enabled for point-in-time recovery"
+              "reason": "Destroy-friendly default \u2014 PITR covers the regenerable idempotency cache; retain_data=true adds the AWS Backup plan"
             }
           ]
         }

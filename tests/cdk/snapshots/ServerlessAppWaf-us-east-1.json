@@ -355,6 +355,11 @@
             "SingleHeader": {
               "Name": "cookie"
             }
+          },
+          {
+            "SingleHeader": {
+              "Name": "x-origin-verify"
+            }
           }
         ],
         "ResourceArn": {

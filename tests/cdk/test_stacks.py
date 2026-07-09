@@ -253,10 +253,12 @@ class TestWafStack:
     def test_waf_logging_redacts_credentials_and_drops_allow(self, waf_template: Template) -> None:
         # WAF logs carry full request headers by default; Authorization/Cookie
         # must be redacted before landing in the aws-waf-logs-* bucket (TODO
-        # "WAF logging — redacted_fields"). ALLOW records are dropped so log
-        # volume scales with threat traffic, not legitimate traffic (TODO
-        # "logging_filter") — traffic analytics stay available via the
-        # CloudFront/S3 access-log Athena tables.
+        # "WAF logging — redacted_fields"), and x-origin-verify is the
+        # CloudFront->origin secret — viewers can send a spoofed copy toward
+        # CloudFront, so it's redacted on this ACL too. ALLOW records are
+        # dropped so log volume scales with threat traffic, not legitimate
+        # traffic (TODO "logging_filter") — traffic analytics stay available
+        # via the CloudFront/S3 access-log Athena tables.
         waf_template.has_resource_properties(
             "AWS::WAFv2::LoggingConfiguration",
             Match.object_like(
@@ -265,6 +267,7 @@ class TestWafStack:
                         [
                             Match.object_like({"SingleHeader": {"Name": "authorization"}}),
                             Match.object_like({"SingleHeader": {"Name": "cookie"}}),
+                            Match.object_like({"SingleHeader": {"Name": "x-origin-verify"}}),
                         ]
                     ),
                     "LoggingFilter": Match.object_like({"DefaultBehavior": "KEEP"}),
@@ -558,7 +561,10 @@ class TestBackendStack:
     def test_waf_logging_redacts_credentials_and_drops_allow(self, backend_template: Template) -> None:
         # Same redaction/drop-ALLOW posture as the CloudFront ACL in WafStack —
         # both LoggingConfigurations share nag_utils.waf_log_redacted_fields()
-        # and WAF_LOG_DROP_ALLOW_FILTER so the two never drift.
+        # and WAF_LOG_DROP_ALLOW_FILTER so the two never drift. The regional
+        # ACL is the one that logs the real x-origin-verify secret (every
+        # CloudFront->origin request carries it), so its redaction here is
+        # load-bearing, not just symmetry.
         backend_template.has_resource_properties(
             "AWS::WAFv2::LoggingConfiguration",
             Match.object_like(
@@ -567,6 +573,7 @@ class TestBackendStack:
                         [
                             Match.object_like({"SingleHeader": {"Name": "authorization"}}),
                             Match.object_like({"SingleHeader": {"Name": "cookie"}}),
+                            Match.object_like({"SingleHeader": {"Name": "x-origin-verify"}}),
                         ]
                     ),
                     "LoggingFilter": Match.object_like({"DefaultBehavior": "KEEP"}),

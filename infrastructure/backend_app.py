@@ -630,8 +630,16 @@ class BackendApp(Construct):
         # x-origin-verify header toward the API origin; the regional WAF blocks any
         # request without it (_attach_regional_waf). No automatic rotation: a rotation
         # Lambda would have to mutate the CFN-managed CloudFront origin header and WAF
-        # rule out-of-band (drift). Manual rotation = put a new secret value, then
-        # `make deploy` (both consumers read it via CFN dynamic references at deploy).
+        # rule out-of-band (drift). Rotation = REPLACE this resource: rename the
+        # construct id (e.g. -> OriginVerifySecretV2) so CFN mints a new secret/ARN;
+        # both consumers' version-less dynamic references then change and redeploy
+        # together in one `make deploy` (brief 403 window while CloudFront propagates,
+        # same as the original rollout; zero-downtime = or_statement over old+new for
+        # one deploy). Do NOT put a new value into the EXISTING secret: the version-less
+        # reference makes that a silent no-op, and a later single-stack update
+        # re-resolves one side only — desyncing the fail-closed WAF rule from the
+        # CloudFront header and 403ing the API through CloudFront. After rotating,
+        # verify: CloudFront URL -> 200, direct execute-api URL -> 403.
         # Known, accepted exposure: the resolved value is readable via waf:GetWebACL —
         # it is an origin discriminator for defense in depth, not a credential.
         self.origin_verify_secret = secretsmanager.Secret(
@@ -647,10 +655,10 @@ class BackendApp(Construct):
             removal_policy=RemovalPolicy.DESTROY,
         )
         rotation_reason = (
-            "No automatic rotation by design: rotating requires updating the CFN-managed CloudFront "
-            "origin header and WAF rule together — a rotation Lambda would mutate both out-of-band "
-            "(drift). Manual rotation: put a new secret value, then redeploy (both consumers resolve "
-            "it via CFN dynamic references)."
+            "No rotation Lambda by design (it would mutate the CFN-managed CloudFront origin header "
+            "and WAF rule out-of-band, as drift): rotation happens by replacing the Secret resource "
+            "(new construct id, new ARN), which atomically re-points both consumers' dynamic "
+            "references in one deploy."
         )
         acknowledge_rules(
             self.origin_verify_secret,

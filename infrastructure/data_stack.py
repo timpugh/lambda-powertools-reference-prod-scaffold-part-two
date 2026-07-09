@@ -155,19 +155,18 @@ class DataStack(Stack):
         else:
             # PITR-only in the destroy-friendly default: the idempotency cache is
             # regenerable data; a backup plan would slow teardown for no recovery value.
-            # Reason text intentionally unchanged from before this feature — it's
-            # baked into the committed prod-shape snapshot's cdk_nag Metadata, and
-            # the default shape must stay template-identical.
+            # Reason text renders into the committed snapshots' cdk_nag Metadata —
+            # changing it requires a snapshot regen (UPDATE_SNAPSHOTS=1 make test-cdk).
             acknowledge_rules(
                 self,
                 [
                     {
                         "id": "NIST.800.53.R5-DynamoDBInBackupPlan",
-                        "reason": "AWS Backup plan not configured for sample app — PITR is enabled for point-in-time recovery",
+                        "reason": "Destroy-friendly default — PITR covers the regenerable idempotency cache; retain_data=true adds the AWS Backup plan",
                     },
                     {
                         "id": "HIPAA.Security-DynamoDBInBackupPlan",
-                        "reason": "AWS Backup plan not configured for sample app — PITR is enabled for point-in-time recovery",
+                        "reason": "Destroy-friendly default — PITR covers the regenerable idempotency cache; retain_data=true adds the AWS Backup plan",
                     },
                 ],
             )

@@ -24,7 +24,7 @@ The hard gates a fork needs to clear before customer traffic touches it. Most it
 
 **Operations gates:**
 
-- [~] Alarms wired to a pageable channel — *routing done:* every alarm (Lambda p90 latency + fault rate, API Gateway 5xx fault rate, DynamoDB read/write throttled events) publishes to a CMK-encrypted SNS topic in the `prod` environment (`AlarmTopicName` CfnOutput). *Still open:* attaching subscriptions (email / Chatbot / PagerDuty) — deliberately manual since they need out-of-band confirmation
+- [~] Alarms wired to a pageable channel — *routing done:* every alarm (Lambda p90 latency + fault rate, API Gateway 5xx fault rate, DynamoDB read/write throttled events, WAF BlockedRequests on both WebACLs, Athena FAILED-query, RUM SessionCount spike) plus the CloudWatch spend budget notification publishes to the same CMK-encrypted SNS topic in the `prod` environment (`AlarmTopicName` CfnOutput). *Still open:* attaching subscriptions (email / Chatbot / PagerDuty) — deliberately manual since they need out-of-band confirmation
 - [x] Audit-grade log retention — app log groups at 90 days; WAF + CloudTrail logs go to **S3** (90-day lifecycle, cheaper than CloudWatch). The compliance tier is now wired behind `retain_data`: the CloudTrail bucket gets versioning, S3 Object Lock (`GOVERNANCE`, 1-year default retention), Glacier@90d / Deep Archive@365d tiering, and a 7-year expiry (**caution:** Object Lock is creation-time-only — flipping `retain_data` on an already-deployed stack *replaces* the bucket; flip it before real audit data accumulates). See [README "Audit stack and log retention"](README.md#audit-stack-and-log-retention)
 - [ ] Live integration tests in CI as a post-deploy gate
 
