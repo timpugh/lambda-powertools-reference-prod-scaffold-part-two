@@ -509,6 +509,25 @@ class TestBackendStack:
             },
         )
 
+    def test_api_is_regional(self, backend_template: Template) -> None:
+        # CloudFront fronts the API (via the same-origin behavior this branch
+        # introduces), so the EDGE layer is redundant; REGIONAL also unlocks
+        # the regional security-policy set for a future custom domain. CFN
+        # updates EndpointConfiguration in place.
+        backend_template.has_resource_properties(
+            "AWS::ApiGateway::RestApi", {"EndpointConfiguration": {"Types": ["REGIONAL"]}}
+        )
+
+    def test_request_validator_attached(self, backend_template: Template) -> None:
+        backend_template.has_resource_properties(
+            "AWS::ApiGateway::RequestValidator",
+            {"ValidateRequestBody": True, "ValidateRequestParameters": True},
+        )
+        backend_template.has_resource_properties(
+            "AWS::ApiGateway::Method",
+            Match.object_like({"HttpMethod": "GET", "RequestValidatorId": Match.any_value()}),
+        )
+
     def test_api_gateway_has_regional_waf(self, backend_template: Template) -> None:
         # A REGIONAL WebACL is associated with the Prod stage to close the
         # execute-api CloudFront-bypass window. Retires the APIG3 /

@@ -171,7 +171,8 @@ class BackendStack(Stack):
             self,
             [
                 # ── AWS Solutions ────────────────────────────────────────────────
-                {"id": "AwsSolutions-APIG2", "reason": "Request validation not needed for sample app"},
+                # AwsSolutions-APIG2 (request validation) is no longer suppressed —
+                # a RequestValidator is attached in BackendApp.
                 # AwsSolutions-APIG3 (WAF on API Gateway) is no longer suppressed —
                 # a REGIONAL WebACL is now associated with the Prod stage in
                 # BackendApp._attach_regional_waf, in addition to the

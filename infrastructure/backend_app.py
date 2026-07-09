@@ -539,6 +539,12 @@ class BackendApp(Construct):
             "RestApi",
             cloud_watch_role=True,
             cloud_watch_role_removal_policy=RemovalPolicy.DESTROY,
+            # REGIONAL: CloudFront fronts this API (the same-origin behavior
+            # this branch introduces), making API Gateway's own edge layer a
+            # redundant second CDN hop. EndpointConfiguration updates in place
+            # per the CFN reference ("No interruption") and the execute-api
+            # URL does not change.
+            endpoint_configuration=apigw.EndpointConfiguration(types=[apigw.EndpointType.REGIONAL]),
             deploy_options=apigw.StageOptions(
                 stage_name="Prod",
                 tracing_enabled=True,
@@ -595,40 +601,7 @@ class BackendApp(Construct):
             ),
         )
 
-        greeting_resource = self.api.root.add_resource("greeting")
-        # Integrate with the alias (not $LATEST) so CodeDeploy traffic shifting
-        # is what actually moves production traffic onto a new version.
-        greeting_resource.add_method("GET", apigw.LambdaIntegration(self.alias))
-        greeting_resource.add_cors_preflight(
-            allow_origins=apigw.Cors.ALL_ORIGINS,
-            allow_methods=["GET", "OPTIONS"],
-            # X-Amzn-Trace-Id is required for CloudWatch RUM to propagate the
-            # client-side X-Ray trace header into the API Gateway → Lambda
-            # segments so the browser and backend appear on the same trace.
-            # Idempotency-Key must be allowed by the preflight or browsers will
-            # block the actual request — the Lambda requires it (returns 400
-            # without it) so the preflight has to permit it explicitly.
-            allow_headers=[*apigw.Cors.DEFAULT_HEADERS, "X-Amzn-Trace-Id", "Idempotency-Key"],
-        )
-
-        # Explicit execution log group — API Gateway creates this outside CloudFormation
-        # when logging_level is enabled. Pre-creating it here transfers ownership to CFN
-        # so it is deleted on cdk destroy. Name format is fixed by the API Gateway service.
-        execution_log_group = logs.LogGroup(
-            self,
-            "ApiExecutionLogs",
-            log_group_name=f"API-Gateway-Execution-Logs_{self.api.rest_api_id}/Prod",
-            encryption_key=self.encryption_key,
-            # 90 days — operational retention (see FunctionLogGroup).
-            retention=logs.RetentionDays.THREE_MONTHS,
-            removal_policy=RemovalPolicy.DESTROY,
-        )
-        # Order the stage after the group: if the stage goes live first and a
-        # request arrives mid-deploy, API Gateway auto-creates the group
-        # (unencrypted, no retention) and this LogGroup CREATE then fails with
-        # "already exists". No cycle: the group depends only on the RestApi
-        # (via rest_api_id in its name), not on the stage.
-        self.api.deployment_stage.node.add_dependency(execution_log_group)
+        self._attach_greeting_resource()
 
         # Regional WAF on API Gateway — closes the CloudFront-bypass window on the
         # public execute-api URL. See _attach_regional_waf for the full rationale.
@@ -1014,6 +987,56 @@ class BackendApp(Construct):
                 )
             ],
         )
+
+    def _attach_greeting_resource(self) -> None:
+        """Wire the ``/greeting`` route: request validation, CORS, execution logs.
+
+        Gateway-layer request validation retires the AwsSolutions-APIG2
+        suppression. /greeting takes no parameters or body today, so this is
+        the gate machinery installed and asserted, live for the first
+        parameterized route — API Gateway then rejects malformed requests
+        before they reach Lambda billing.
+        """
+        request_validator = self.api.add_request_validator(
+            "RequestValidator",
+            validate_request_body=True,
+            validate_request_parameters=True,
+        )
+
+        greeting_resource = self.api.root.add_resource("greeting")
+        # Integrate with the alias (not $LATEST) so CodeDeploy traffic shifting
+        # is what actually moves production traffic onto a new version.
+        greeting_resource.add_method("GET", apigw.LambdaIntegration(self.alias), request_validator=request_validator)
+        greeting_resource.add_cors_preflight(
+            allow_origins=apigw.Cors.ALL_ORIGINS,
+            allow_methods=["GET", "OPTIONS"],
+            # X-Amzn-Trace-Id is required for CloudWatch RUM to propagate the
+            # client-side X-Ray trace header into the API Gateway → Lambda
+            # segments so the browser and backend appear on the same trace.
+            # Idempotency-Key must be allowed by the preflight or browsers will
+            # block the actual request — the Lambda requires it (returns 400
+            # without it) so the preflight has to permit it explicitly.
+            allow_headers=[*apigw.Cors.DEFAULT_HEADERS, "X-Amzn-Trace-Id", "Idempotency-Key"],
+        )
+
+        # Explicit execution log group — API Gateway creates this outside CloudFormation
+        # when logging_level is enabled. Pre-creating it here transfers ownership to CFN
+        # so it is deleted on cdk destroy. Name format is fixed by the API Gateway service.
+        execution_log_group = logs.LogGroup(
+            self,
+            "ApiExecutionLogs",
+            log_group_name=f"API-Gateway-Execution-Logs_{self.api.rest_api_id}/Prod",
+            encryption_key=self.encryption_key,
+            # 90 days — operational retention (see FunctionLogGroup).
+            retention=logs.RetentionDays.THREE_MONTHS,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        # Order the stage after the group: if the stage goes live first and a
+        # request arrives mid-deploy, API Gateway auto-creates the group
+        # (unencrypted, no retention) and this LogGroup CREATE then fails with
+        # "already exists". No cycle: the group depends only on the RestApi
+        # (via rest_api_id in its name), not on the stage.
+        self.api.deployment_stage.node.add_dependency(execution_log_group)
 
     def _attach_regional_waf(self) -> None:
         """Attach a REGIONAL WAF WebACL to the API Gateway stage.
