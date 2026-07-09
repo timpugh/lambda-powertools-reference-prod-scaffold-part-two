@@ -2161,38 +2161,43 @@
             "Action": {
               "Block": {}
             },
-            "Name": "RateLimitDirectCallers",
+            "Name": "RejectNonCloudFront",
             "Priority": 4,
             "Statement": {
-              "RateBasedStatement": {
-                "AggregateKeyType": "IP",
-                "Limit": 300,
-                "ScopeDownStatement": {
-                  "NotStatement": {
-                    "Statement": {
-                      "SizeConstraintStatement": {
-                        "ComparisonOperator": "GT",
-                        "FieldToMatch": {
-                          "SingleHeader": {
-                            "Name": "x-forwarded-for"
-                          }
-                        },
-                        "Size": 0,
-                        "TextTransformations": [
-                          {
-                            "Priority": 0,
-                            "Type": "NONE"
-                          }
-                        ]
+              "NotStatement": {
+                "Statement": {
+                  "ByteMatchStatement": {
+                    "FieldToMatch": {
+                      "SingleHeader": {
+                        "Name": "x-origin-verify"
                       }
-                    }
+                    },
+                    "PositionalConstraint": "EXACTLY",
+                    "SearchString": {
+                      "Fn::Join": [
+                        "",
+                        [
+                          "{{resolve:secretsmanager:",
+                          {
+                            "Ref": "AppOriginVerifySecret32717393"
+                          },
+                          ":SecretString:::}}"
+                        ]
+                      ]
+                    },
+                    "TextTransformations": [
+                      {
+                        "Priority": 0,
+                        "Type": "NONE"
+                      }
+                    ]
                   }
                 }
               }
             },
             "VisibilityConfig": {
               "CloudWatchMetricsEnabled": true,
-              "MetricName": "ServerlessAppBackend-us-east-1-api-RateLimitDirectCallers",
+              "MetricName": "ServerlessAppBackend-us-east-1-api-RejectNonCloudFront",
               "SampledRequestsEnabled": true
             }
           }
@@ -3153,6 +3158,70 @@
               "Effect": "Allow",
               "Principal": {
                 "Service": "logs.us-east-1.amazonaws.com"
+              },
+              "Resource": "*"
+            },
+            {
+              "Action": [
+                "kms:Decrypt",
+                "kms:Encrypt",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*"
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": "secretsmanager.us-east-1.amazonaws.com"
+                }
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition"
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId"
+                      },
+                      ":root"
+                    ]
+                  ]
+                }
+              },
+              "Resource": "*"
+            },
+            {
+              "Action": [
+                "kms:CreateGrant",
+                "kms:DescribeKey"
+              ],
+              "Condition": {
+                "StringEquals": {
+                  "kms:ViaService": "secretsmanager.us-east-1.amazonaws.com"
+                }
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition"
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId"
+                      },
+                      ":root"
+                    ]
+                  ]
+                }
               },
               "Resource": "*"
             },
@@ -4652,6 +4721,79 @@
         "TreatMissingData": "notBreaching"
       },
       "Type": "AWS::CloudWatch::Alarm"
+    },
+    "AppOriginVerifySecret32717393": {
+      "DeletionPolicy": "Delete",
+      "Metadata": {
+        "cdk_nag": {
+          "rules_to_suppress": [
+            {
+              "id": "AwsSolutions-SMG4",
+              "reason": "No automatic rotation by design: rotating requires updating the CFN-managed CloudFront origin header and WAF rule together \u2014 a rotation Lambda would mutate both out-of-band (drift). Manual rotation: put a new secret value, then redeploy (both consumers resolve it via CFN dynamic references)."
+            },
+            {
+              "id": "NIST.800.53.R5-SecretsManagerRotationEnabled",
+              "reason": "No automatic rotation by design: rotating requires updating the CFN-managed CloudFront origin header and WAF rule together \u2014 a rotation Lambda would mutate both out-of-band (drift). Manual rotation: put a new secret value, then redeploy (both consumers resolve it via CFN dynamic references)."
+            },
+            {
+              "id": "HIPAA.Security-SecretsManagerRotationEnabled",
+              "reason": "No automatic rotation by design: rotating requires updating the CFN-managed CloudFront origin header and WAF rule together \u2014 a rotation Lambda would mutate both out-of-band (drift). Manual rotation: put a new secret value, then redeploy (both consumers resolve it via CFN dynamic references)."
+            },
+            {
+              "id": "AwsSolutions-APIG4",
+              "reason": "Authorization not needed for sample app"
+            },
+            {
+              "id": "AwsSolutions-COG4",
+              "reason": "Cognito authorizer not needed for sample app"
+            },
+            {
+              "id": "CdkNagValidationFailure",
+              "reason": "Serverless-APIGWStructuredLogging validation fails due to intrinsic function reference in access log destination \u2014 structured JSON logging is configured via logging_format=JSON on the Lambda"
+            },
+            {
+              "id": "NIST.800.53.R5-APIGWSSLEnabled",
+              "reason": "Client-side SSL certificates not required for sample app"
+            },
+            {
+              "id": "NIST.800.53.R5-APIGWCacheEnabledAndEncrypted",
+              "reason": "API Gateway cache cluster intentionally disabled for cost reasons \u2014 the smallest 0.5 GB cluster is ~$14/month for a sample app. Caching GET /greeting would also serve stale values across SSM parameter and AppConfig feature-flag changes."
+            },
+            {
+              "id": "HIPAA.Security-APIGWSSLEnabled",
+              "reason": "Client-side SSL certificates not required for sample app"
+            },
+            {
+              "id": "HIPAA.Security-APIGWCacheEnabledAndEncrypted",
+              "reason": "API Gateway cache cluster intentionally disabled for cost reasons \u2014 see NIST.800.53.R5-APIGWCacheEnabledAndEncrypted rationale above."
+            },
+            {
+              "id": "PCI.DSS.321-APIGWSSLEnabled",
+              "reason": "Client-side SSL certificates not required for sample app"
+            },
+            {
+              "id": "PCI.DSS.321-APIGWCacheEnabledAndEncrypted",
+              "reason": "API Gateway cache cluster intentionally disabled for cost reasons \u2014 see NIST.800.53.R5-APIGWCacheEnabledAndEncrypted rationale above."
+            }
+          ]
+        }
+      },
+      "Properties": {
+        "Description": "Header value CloudFront must present to reach the API origin",
+        "GenerateSecretString": {
+          "ExcludePunctuation": true,
+          "IncludeSpace": false,
+          "PasswordLength": 32
+        },
+        "KmsKeyId": {
+          "Fn::GetAtt": [
+            "AppEncryptionKey7F644894",
+            "Arn"
+          ]
+        }
+      },
+      "Type": "AWS::SecretsManager::Secret",
+      "UpdateReplacePolicy": "Delete"
     },
     "AppRegionalWafBlockedRequestsAlarm131E47C5": {
       "Metadata": {

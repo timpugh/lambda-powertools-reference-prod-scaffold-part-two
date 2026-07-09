@@ -593,27 +593,27 @@ class TestBackendStack:
             },
         )
 
-    def test_regional_waf_rate_limits_direct_callers_only(self, backend_template: Template) -> None:
-        # The regional ACL rate-limits only requests WITHOUT X-Forwarded-For —
-        # direct execute-api callers, the CloudFront-bypass path. Funnelled
-        # traffic always carries the XFF header CloudFront appends toward the
-        # origin, so it must never match: the scope-down NotStatement is the
-        # security-critical part, not just the rule's presence. Without this
-        # rule one direct caller could exhaust the shared stage throttle and
-        # starve legitimate funnelled users (see _attach_regional_waf).
+    def test_regional_waf_rejects_requests_without_origin_secret(self, backend_template: Template) -> None:
+        # Origin lockdown (TODO "Close the CloudFront-bypass window", option b):
+        # CloudFront injects x-origin-verify (frontend stack); this rule blocks
+        # anything that doesn't carry it, so the direct execute-api URL rejects
+        # non-CloudFront callers outright. Supersedes the RateLimitDirectCallers
+        # rate rule (blocking beats rate-limiting the same traffic).
         acls = backend_template.find_resources("AWS::WAFv2::WebACL")
-        regional = [a for a in acls.values() if a["Properties"]["Scope"] == "REGIONAL"]
-        assert len(regional) == 1, "expected exactly one REGIONAL WebACL"
-        rules = {r["Name"]: r for r in regional[0]["Properties"]["Rules"]}
-        rule = rules.get("RateLimitDirectCallers")
-        assert rule is not None, "expected the direct-caller rate rule on the regional ACL"
-        assert rule["Action"] == {"Block": {}}
-        stmt = rule["Statement"]["RateBasedStatement"]
-        assert stmt["AggregateKeyType"] == "IP"
-        scope_down = stmt["ScopeDownStatement"]["NotStatement"]["Statement"]["SizeConstraintStatement"]
-        assert scope_down["FieldToMatch"]["SingleHeader"]["Name"] == "x-forwarded-for"
-        assert scope_down["ComparisonOperator"] == "GT"
-        assert scope_down["Size"] == 0
+        regional = next(a for a in acls.values() if a["Properties"]["Scope"] == "REGIONAL")
+        rules = {r["Name"]: r for r in regional["Properties"]["Rules"]}
+        assert "RateLimitDirectCallers" not in rules
+        reject = rules["RejectNonCloudFront"]
+        assert reject["Action"] == {"Block": {}}
+        byte_match = reject["Statement"]["NotStatement"]["Statement"]["ByteMatchStatement"]
+        assert byte_match["FieldToMatch"] == {"SingleHeader": {"Name": "x-origin-verify"}}
+        assert byte_match["PositionalConstraint"] == "EXACTLY"
+        assert "{{resolve:secretsmanager:" in json.dumps(byte_match["SearchString"])
+
+    def test_origin_verify_secret_is_cmk_encrypted(self, backend_template: Template) -> None:
+        backend_template.has_resource_properties(
+            "AWS::SecretsManager::Secret", Match.object_like({"KmsKeyId": Match.any_value()})
+        )
 
     def test_waf_blocked_requests_alarms_exist(self, backend_template: Template) -> None:
         # Spike alarms on both WebACLs (TODO "WAF — BlockedRequests"); the

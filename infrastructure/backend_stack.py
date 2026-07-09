@@ -89,6 +89,7 @@ class BackendStack(Stack):
         # frontend CSP pin the exact execute-api host instead of a region wildcard).
         self.api_url = self.app.api_url
         self.api_id = self.app.api.rest_api_id
+        self.origin_verify_secret = self.app.origin_verify_secret
 
         CfnOutput(
             self,

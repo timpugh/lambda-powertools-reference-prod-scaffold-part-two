@@ -58,6 +58,9 @@ from aws_cdk import (
     aws_resourcegroups as rg,
 )
 from aws_cdk import (
+    aws_secretsmanager as secretsmanager,
+)
+from aws_cdk import (
     aws_sns as sns,
 )
 from aws_cdk import (
@@ -603,8 +606,44 @@ class BackendApp(Construct):
 
         self._attach_greeting_resource()
 
+        # Shared origin-verify secret: CloudFront (frontend stack) injects it as the
+        # x-origin-verify header toward the API origin; the regional WAF blocks any
+        # request without it (_attach_regional_waf). No automatic rotation: a rotation
+        # Lambda would have to mutate the CFN-managed CloudFront origin header and WAF
+        # rule out-of-band (drift). Manual rotation = put a new secret value, then
+        # `make deploy` (both consumers read it via CFN dynamic references at deploy).
+        # Known, accepted exposure: the resolved value is readable via waf:GetWebACL —
+        # it is an origin discriminator for defense in depth, not a credential.
+        self.origin_verify_secret = secretsmanager.Secret(
+            self,
+            "OriginVerifySecret",
+            description="Header value CloudFront must present to reach the API origin",
+            encryption_key=self.encryption_key,
+            generate_secret_string=secretsmanager.SecretStringGenerator(
+                exclude_punctuation=True,
+                include_space=False,
+                password_length=32,
+            ),
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+        rotation_reason = (
+            "No automatic rotation by design: rotating requires updating the CFN-managed CloudFront "
+            "origin header and WAF rule together — a rotation Lambda would mutate both out-of-band "
+            "(drift). Manual rotation: put a new secret value, then redeploy (both consumers resolve "
+            "it via CFN dynamic references)."
+        )
+        acknowledge_rules(
+            self.origin_verify_secret,
+            [
+                {"id": "AwsSolutions-SMG4", "reason": rotation_reason},
+                {"id": "NIST.800.53.R5-SecretsManagerRotationEnabled", "reason": rotation_reason},
+                {"id": "HIPAA.Security-SecretsManagerRotationEnabled", "reason": rotation_reason},
+            ],
+        )
+
         # Regional WAF on API Gateway — closes the CloudFront-bypass window on the
-        # public execute-api URL. See _attach_regional_waf for the full rationale.
+        # public execute-api URL by rejecting any caller that doesn't carry the
+        # origin-verify secret. See _attach_regional_waf for the full rationale.
         self._attach_regional_waf()
 
         # CodeDeploy traffic-shifting deployment for the Lambda alias, with
@@ -1054,67 +1093,52 @@ class BackendApp(Construct):
         WAF stack). The shared ``build_managed_threat_rules`` helper guarantees the
         rule set never drifts from the CloudFront ACL.
 
-        The shared set omits a rate rule because edge and origin need different
-        aggregation, so this ACL carries its own (``RateLimitDirectCallers``,
-        priority 4): funnelled traffic reaches the origin from CloudFront edge
-        IPs (a plain IP-aggregated limit would pool many legitimate users behind
-        a few shared edge IPs), while a *direct* ``execute-api`` caller — the
-        bypass path this ACL exists to cover — arrives from its own IP and
-        without the ``X-Forwarded-For`` header CloudFront always appends toward
-        the origin. Scoping an IP-aggregated limit to XFF-less requests
-        rate-limits each direct caller per client IP while leaving funnelled
-        traffic untouched; without it, one direct caller could exhaust the
-        *shared* stage throttle (throttling_rate_limit=100) and starve the
-        legitimate CloudFront-funnelled users behind it.
-
-        This is defence in depth, not a replacement for the documented fixes: a
-        direct caller can spoof ``X-Forwarded-For`` to evade the rate rule, so
-        a fork can still add a CloudFront-injected secret header + API Gateway
-        resource policy to make the origin reject any non-CloudFront request
-        outright (TODO "Close the CloudFront-bypass window" option (b)).
+        On top of the shared managed groups, this ACL carries the origin lockdown
+        rule (``RejectNonCloudFront``, priority 4 — TODO "Close the CloudFront-bypass
+        window" option (b)): the frontend stack injects a secret value as the
+        ``x-origin-verify`` header on every CloudFront→origin request, and this rule
+        blocks any request that doesn't carry an exact match for it. That closes the
+        bypass window outright rather than merely rate-limiting it, which supersedes
+        the previous XFF-scoped ``RateLimitDirectCallers`` rate rule entirely — a
+        direct ``execute-api`` caller can spoof ``X-Forwarded-For``, but it cannot
+        produce the secret header value, so blocking beats rate-limiting the same
+        traffic. See ``_attach_regional_waf``'s rule construction below for the
+        deploy-order caveat this introduces.
         """
         stack = Stack.of(self)
 
-        # Rate-limit DIRECT callers only (priority 4, after the shared managed
-        # groups at 0-3). The scope-down statement matches only requests WITHOUT
-        # an X-Forwarded-For header — CloudFront always appends XFF toward the
-        # origin, so funnelled traffic never matches and only direct execute-api
-        # callers are counted, each aggregated by its own client IP. See the
-        # method docstring for the full rationale and the spoofing caveat.
-        direct_caller_rate_rule = wafv2.CfnWebACL.RuleProperty(
-            name="RateLimitDirectCallers",
+        # Block anything not funneled through CloudFront (TODO option (b) — the
+        # stronger origin lockdown). Priority 4 (after the shared managed groups at
+        # 0-3, whose priorities are shared with the CloudFront ACL and must not be
+        # renumbered): a funneled request carries the header and passes; a direct
+        # execute-api caller doesn't and is blocked — which supersedes the previous
+        # XFF-scoped RateLimitDirectCallers rate rule entirely. The byte-match reads
+        # the secret via a CFN dynamic reference, resolved at deploy time.
+        # DEPLOY-ORDER CAVEAT: the backend deploys before the frontend, so during the
+        # one deploy that introduces this rule, browsers still on the old direct
+        # execute-api config.json get 403s until the frontend behavior + cache
+        # invalidation land (minutes). Documented in README.
+        reject_non_cloudfront_rule = wafv2.CfnWebACL.RuleProperty(
+            name="RejectNonCloudFront",
             priority=4,
             action=wafv2.CfnWebACL.RuleActionProperty(block={}),
             statement=wafv2.CfnWebACL.StatementProperty(
-                rate_based_statement=wafv2.CfnWebACL.RateBasedStatementProperty(
-                    # 300 requests / 5 min per direct-caller IP — above any
-                    # plausible legitimate direct use (the frontend goes through
-                    # CloudFront), well under the shared stage throttle it protects.
-                    limit=300,
-                    aggregate_key_type="IP",
-                    scope_down_statement=wafv2.CfnWebACL.StatementProperty(
-                        not_statement=wafv2.CfnWebACL.NotStatementProperty(
-                            statement=wafv2.CfnWebACL.StatementProperty(
-                                # "Header present and non-empty" — WAF has no
-                                # first-class exists-check, so match length > 0.
-                                size_constraint_statement=wafv2.CfnWebACL.SizeConstraintStatementProperty(
-                                    field_to_match=wafv2.CfnWebACL.FieldToMatchProperty(
-                                        single_header={"Name": "x-forwarded-for"}
-                                    ),
-                                    comparison_operator="GT",
-                                    size=0,
-                                    text_transformations=[
-                                        wafv2.CfnWebACL.TextTransformationProperty(priority=0, type="NONE")
-                                    ],
-                                )
-                            )
+                not_statement=wafv2.CfnWebACL.NotStatementProperty(
+                    statement=wafv2.CfnWebACL.StatementProperty(
+                        byte_match_statement=wafv2.CfnWebACL.ByteMatchStatementProperty(
+                            field_to_match=wafv2.CfnWebACL.FieldToMatchProperty(
+                                single_header={"Name": "x-origin-verify"}
+                            ),
+                            positional_constraint="EXACTLY",
+                            search_string=self.origin_verify_secret.secret_value.unsafe_unwrap(),
+                            text_transformations=[wafv2.CfnWebACL.TextTransformationProperty(priority=0, type="NONE")],
                         )
-                    ),
+                    )
                 )
             ),
             visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
                 cloud_watch_metrics_enabled=True,
-                metric_name=f"{stack.stack_name}-api-RateLimitDirectCallers",
+                metric_name=f"{stack.stack_name}-api-RejectNonCloudFront",
                 sampled_requests_enabled=True,
             ),
         )
@@ -1136,7 +1160,7 @@ class BackendApp(Construct):
                 metric_name=f"{stack.stack_name}ApiRegionalWebACL",
                 sampled_requests_enabled=True,
             ),
-            rules=[*build_managed_threat_rules(f"{stack.stack_name}-api"), direct_caller_rate_rule],
+            rules=[*build_managed_threat_rules(f"{stack.stack_name}-api"), reject_non_cloudfront_rule],
         )
 
         # WAF logging — required by NIST/HIPAA/PCI WAFv2LoggingEnabled, mirroring
