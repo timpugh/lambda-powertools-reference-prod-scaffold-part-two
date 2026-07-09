@@ -630,16 +630,25 @@ class BackendApp(Construct):
         # x-origin-verify header toward the API origin; the regional WAF blocks any
         # request without it (_attach_regional_waf). No automatic rotation: a rotation
         # Lambda would have to mutate the CFN-managed CloudFront origin header and WAF
-        # rule out-of-band (drift). Rotation = REPLACE this resource: rename the
-        # construct id (e.g. -> OriginVerifySecretV2) so CFN mints a new secret/ARN;
-        # both consumers' version-less dynamic references then change and redeploy
-        # together in one `make deploy` (brief 403 window while CloudFront propagates,
-        # same as the original rollout; zero-downtime = or_statement over old+new for
-        # one deploy). Do NOT put a new value into the EXISTING secret: the version-less
-        # reference makes that a silent no-op, and a later single-stack update
-        # re-resolves one side only — desyncing the fail-closed WAF rule from the
-        # CloudFront header and 403ing the API through CloudFront. After rotating,
-        # verify: CloudFront URL -> 200, direct execute-api URL -> 403.
+        # rule out-of-band (drift). Rotation = ADD a new Secret construct, in two
+        # deploys — NOT a rename. Renaming the construct id (-> OriginVerifySecretV2)
+        # replaces the secret and hits the same in-use-export trap already documented
+        # for the api_url export (see backend_stack.py's TEMPORARY export retention
+        # comment / TODO.md): the old secret's export can't be deleted while the
+        # not-yet-deployed frontend still imports it, and the backend stack deploys
+        # first, so `cdk deploy '**'` fails on first use. Deploy 1: add
+        # OriginVerifySecretV2 alongside this construct, re-point both consumers (WAF
+        # byte-match, CloudFront header) at it, keep this construct in place, and add
+        # self.export_value(self.origin_verify_secret.secret_arn) in BackendStack so
+        # its export survives (brief 403 window while CloudFront propagates, same as
+        # the original rollout; zero-downtime = or_statement over old+new for deploy
+        # 1). Deploy 2 (once every environment has taken deploy 1): delete this
+        # construct and the export_value() line. Do NOT put a new value into the
+        # EXISTING secret: the version-less reference makes that a silent no-op, and a
+        # later single-stack update re-resolves one side only — desyncing the
+        # fail-closed WAF rule from the CloudFront header and 403ing the API through
+        # CloudFront. After rotating, verify: CloudFront URL -> 200, direct
+        # execute-api URL -> 403.
         # Known, accepted exposure: the resolved value is readable via waf:GetWebACL —
         # it is an origin discriminator for defense in depth, not a credential.
         self.origin_verify_secret = secretsmanager.Secret(
