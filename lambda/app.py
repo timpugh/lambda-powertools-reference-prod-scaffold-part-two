@@ -20,7 +20,6 @@ from typing import Any, cast
 import boto3
 from aws_lambda_powertools import Logger, Metrics, Tracer
 from aws_lambda_powertools.event_handler import APIGatewayRestResolver
-from aws_lambda_powertools.event_handler.api_gateway import CORSConfig
 from aws_lambda_powertools.event_handler.exceptions import InternalServerError
 from aws_lambda_powertools.logging import correlation_paths
 from aws_lambda_powertools.utilities.data_classes import APIGatewayProxyEvent
@@ -106,23 +105,9 @@ boto_config = Config(
 # We deliberately do NOT call app.enable_swagger() here — exposing the spec at
 # runtime would publish the full API surface to any caller. The spec is
 # instead rendered into Zensical at documentation-build time.
+# No CORSConfig: the browser reaches this API same-origin via CloudFront's
+# /api/* behavior, so CORS does not apply — see infrastructure/frontend_stack.py.
 app = APIGatewayRestResolver(
-    # allow_headers is only relevant for the response-side CORS Access-Control-
-    # Allow-Headers value, but for completeness we list Idempotency-Key here
-    # too — keeps the Powertools CORSConfig in sync with API Gateway's preflight
-    # configuration declared in CDK.
-    cors=CORSConfig(
-        allow_origin="*",
-        max_age=300,
-        allow_headers=[
-            "Content-Type",
-            "X-Amz-Date",
-            "Authorization",
-            "X-Api-Key",
-            "X-Amzn-Trace-Id",
-            "Idempotency-Key",
-        ],
-    ),
     enable_validation=True,
 )
 
@@ -385,13 +370,11 @@ def lambda_handler(event: dict[str, Any], context: LambdaContext) -> dict[str, A
         logger.warning("Request rejected: missing Idempotency-Key header")
         return {
             "statusCode": 400,
-            # This response is built outside the Powertools resolver, so it must
-            # carry its own CORS header (the resolver adds one to every response
-            # it builds) — without it, cross-origin browsers can't read the 400
-            # body at all. Keep in sync with CORSConfig.allow_origin above.
+            # This response is built outside the Powertools resolver, but no
+            # CORS header is required — the browser reaches this API
+            # same-origin via CloudFront's /api/* behavior.
             "headers": {
                 "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*",
             },
             "body": '{"message":"Idempotency-Key header is required"}',
             "isBase64Encoded": False,
@@ -406,11 +389,10 @@ def lambda_handler(event: dict[str, Any], context: LambdaContext) -> dict[str, A
         logger.warning("Request rejected: duplicate request while the original is still in progress")
         return {
             "statusCode": 409,
-            # Built outside the resolver — carries its own CORS header, same
-            # rule as the 400 above. Keep in sync with CORSConfig.allow_origin.
+            # Built outside the resolver, same as the 400 above — no CORS
+            # header required (same-origin via CloudFront's /api/* behavior).
             "headers": {
                 "Content-Type": "application/json",
-                "Access-Control-Allow-Origin": "*",
             },
             "body": '{"message":"A request with this Idempotency-Key is still in progress; retry shortly"}',
             "isBase64Encoded": False,

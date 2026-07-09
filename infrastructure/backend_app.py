@@ -1028,7 +1028,7 @@ class BackendApp(Construct):
         )
 
     def _attach_greeting_resource(self) -> None:
-        """Wire the ``/greeting`` route: request validation, CORS, execution logs.
+        """Wire the ``/greeting`` route: request validation, execution logs.
 
         Gateway-layer request validation retires the AwsSolutions-APIG2
         suppression. /greeting takes no parameters or body today, so this is
@@ -1046,17 +1046,6 @@ class BackendApp(Construct):
         # Integrate with the alias (not $LATEST) so CodeDeploy traffic shifting
         # is what actually moves production traffic onto a new version.
         greeting_resource.add_method("GET", apigw.LambdaIntegration(self.alias), request_validator=request_validator)
-        greeting_resource.add_cors_preflight(
-            allow_origins=apigw.Cors.ALL_ORIGINS,
-            allow_methods=["GET", "OPTIONS"],
-            # X-Amzn-Trace-Id is required for CloudWatch RUM to propagate the
-            # client-side X-Ray trace header into the API Gateway → Lambda
-            # segments so the browser and backend appear on the same trace.
-            # Idempotency-Key must be allowed by the preflight or browsers will
-            # block the actual request — the Lambda requires it (returns 400
-            # without it) so the preflight has to permit it explicitly.
-            allow_headers=[*apigw.Cors.DEFAULT_HEADERS, "X-Amzn-Trace-Id", "Idempotency-Key"],
-        )
 
         # Explicit execution log group — API Gateway creates this outside CloudFormation
         # when logging_level is enabled. Pre-creating it here transfers ownership to CFN

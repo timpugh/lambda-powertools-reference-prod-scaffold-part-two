@@ -5068,10 +5068,9 @@
       "Type": "AWS::IAM::Role",
       "UpdateReplacePolicy": "Delete"
     },
-    "AppRestApiDeployment0A1A30D730cfb0b6f67d59b03bd13e9a4f9ef4de": {
+    "AppRestApiDeployment0A1A30D7a0500008d77d8d5eaf8ea001f4c850e0": {
       "DependsOn": [
         "AppRestApigreetingGETE278858C",
-        "AppRestApigreetingOPTIONS18B87E90",
         "AppRestApigreeting2BA1B41F",
         "AppRestApiRequestValidator0143C4A8"
       ],
@@ -5184,7 +5183,7 @@
           "Format": "{\"requestId\":\"$context.requestId\",\"accountId\":\"$context.accountId\",\"apiId\":\"$context.apiId\",\"stage\":\"$context.stage\",\"resourcePath\":\"$context.resourcePath\",\"httpMethod\":\"$context.httpMethod\",\"protocol\":\"$context.protocol\",\"status\":\"$context.status\",\"responseType\":\"$context.error.responseType\",\"errorMessage\":\"$context.error.message\",\"requestTime\":\"$context.requestTime\",\"responseLatency\":\"$context.responseLatency\",\"ip\":\"$context.identity.sourceIp\",\"caller\":\"$context.identity.caller\",\"user\":\"$context.identity.user\",\"responseLength\":\"$context.responseLength\",\"xrayTraceId\":\"$context.xrayTraceId\"}"
         },
         "DeploymentId": {
-          "Ref": "AppRestApiDeployment0A1A30D730cfb0b6f67d59b03bd13e9a4f9ef4de"
+          "Ref": "AppRestApiDeployment0A1A30D7a0500008d77d8d5eaf8ea001f4c850e0"
         },
         "MethodSettings": [
           {
@@ -5530,88 +5529,6 @@
         "RequestValidatorId": {
           "Ref": "AppRestApiRequestValidator0143C4A8"
         },
-        "ResourceId": {
-          "Ref": "AppRestApigreeting2BA1B41F"
-        },
-        "RestApiId": {
-          "Ref": "AppRestApiB4885DCD"
-        }
-      },
-      "Type": "AWS::ApiGateway::Method"
-    },
-    "AppRestApigreetingOPTIONS18B87E90": {
-      "Metadata": {
-        "cdk_nag": {
-          "rules_to_suppress": [
-            {
-              "id": "AwsSolutions-APIG4",
-              "reason": "Authorization not needed for sample app"
-            },
-            {
-              "id": "AwsSolutions-COG4",
-              "reason": "Cognito authorizer not needed for sample app"
-            },
-            {
-              "id": "CdkNagValidationFailure",
-              "reason": "Serverless-APIGWStructuredLogging validation fails due to intrinsic function reference in access log destination \u2014 structured JSON logging is configured via logging_format=JSON on the Lambda"
-            },
-            {
-              "id": "NIST.800.53.R5-APIGWSSLEnabled",
-              "reason": "Client-side SSL certificates not required for sample app"
-            },
-            {
-              "id": "NIST.800.53.R5-APIGWCacheEnabledAndEncrypted",
-              "reason": "API Gateway cache cluster intentionally disabled for cost reasons \u2014 the smallest 0.5 GB cluster is ~$14/month for a sample app. Caching GET /greeting would also serve stale values across SSM parameter and AppConfig feature-flag changes."
-            },
-            {
-              "id": "HIPAA.Security-APIGWSSLEnabled",
-              "reason": "Client-side SSL certificates not required for sample app"
-            },
-            {
-              "id": "HIPAA.Security-APIGWCacheEnabledAndEncrypted",
-              "reason": "API Gateway cache cluster intentionally disabled for cost reasons \u2014 see NIST.800.53.R5-APIGWCacheEnabledAndEncrypted rationale above."
-            },
-            {
-              "id": "PCI.DSS.321-APIGWSSLEnabled",
-              "reason": "Client-side SSL certificates not required for sample app"
-            },
-            {
-              "id": "PCI.DSS.321-APIGWCacheEnabledAndEncrypted",
-              "reason": "API Gateway cache cluster intentionally disabled for cost reasons \u2014 see NIST.800.53.R5-APIGWCacheEnabledAndEncrypted rationale above."
-            }
-          ]
-        }
-      },
-      "Properties": {
-        "ApiKeyRequired": false,
-        "AuthorizationType": "NONE",
-        "HttpMethod": "OPTIONS",
-        "Integration": {
-          "IntegrationResponses": [
-            {
-              "ResponseParameters": {
-                "method.response.header.Access-Control-Allow-Headers": "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent,X-Amzn-Trace-Id,Idempotency-Key'",
-                "method.response.header.Access-Control-Allow-Methods": "'GET,OPTIONS'",
-                "method.response.header.Access-Control-Allow-Origin": "'*'"
-              },
-              "StatusCode": "204"
-            }
-          ],
-          "RequestTemplates": {
-            "application/json": "{ statusCode: 200 }"
-          },
-          "Type": "MOCK"
-        },
-        "MethodResponses": [
-          {
-            "ResponseParameters": {
-              "method.response.header.Access-Control-Allow-Headers": true,
-              "method.response.header.Access-Control-Allow-Methods": true,
-              "method.response.header.Access-Control-Allow-Origin": true
-            },
-            "StatusCode": "204"
-          }
-        ],
         "ResourceId": {
           "Ref": "AppRestApigreeting2BA1B41F"
         },

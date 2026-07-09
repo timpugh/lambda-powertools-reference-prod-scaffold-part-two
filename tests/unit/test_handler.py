@@ -167,11 +167,10 @@ def test_missing_idempotency_key_returns_400(apigw_event, lambda_context, lambda
 
     assert ret["statusCode"] == 400
     assert "Idempotency-Key" in ret["body"]
-    # The 400 is built by hand outside the Powertools resolver, so it must carry
-    # its own CORS header — without it, cross-origin browser callers (the
-    # CloudFront-hosted frontend) get an opaque CORS failure instead of the
-    # documented 400 body. Keep in sync with CORSConfig.allow_origin.
-    assert ret["headers"]["Access-Control-Allow-Origin"] == "*"
+    # Same-origin through CloudFront (config.json apiUrl=/api): no CORS headers
+    # anywhere — stronger than restricting allow_origin (TODO "CORS origin restriction").
+    assert "Access-Control-Allow-Origin" not in ret["headers"]
+    assert ret["headers"]["Content-Type"] == "application/json"
 
 
 def test_missing_headers_object_returns_400(apigw_event, lambda_context, lambda_app_module, monkeypatch):
@@ -454,9 +453,10 @@ def test_duplicate_request_in_progress_returns_409(apigw_event, lambda_context, 
     assert ret["statusCode"] == 409
     assert "Idempotency-Key" in ret["body"]
     assert "in progress" in ret["body"]
-    # Built outside the Powertools resolver, so it must carry its own CORS
-    # header — same contract as the 400. Keep in sync with CORSConfig.
-    assert ret["headers"]["Access-Control-Allow-Origin"] == "*"
+    # Same-origin through CloudFront (config.json apiUrl=/api): no CORS headers
+    # anywhere — stronger than restricting allow_origin (TODO "CORS origin restriction").
+    assert "Access-Control-Allow-Origin" not in ret["headers"]
+    assert ret["headers"]["Content-Type"] == "application/json"
 
 
 def test_sdk_socket_timeouts_bounded(lambda_app_module):
