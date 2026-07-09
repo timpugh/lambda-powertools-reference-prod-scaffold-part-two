@@ -401,6 +401,20 @@ class TestDataStack:
     def test_retained_key_is_retained(self, data_template_retained: Template) -> None:
         data_template_retained.has_resource("AWS::KMS::Key", {"DeletionPolicy": "Retain"})
 
+    # ── AWS Backup plan (retain_data=True only) ───────────────────────────────
+    # PITR alone can't satisfy a long-horizon compliance retention window, so
+    # the production posture layers an AWS Backup plan on top of PITR.
+
+    def test_default_shape_has_no_backup_plan(self, data_template: Template) -> None:
+        data_template.resource_count_is("AWS::Backup::BackupVault", 0)
+
+    def test_retained_shape_has_backup_vault_plan_and_selection(self, data_template_retained: Template) -> None:
+        # retain_data=True is the production posture; PITR (1-day window)
+        # alone can't satisfy long-horizon compliance retention (TODO "AWS Backup plan").
+        data_template_retained.resource_count_is("AWS::Backup::BackupVault", 1)
+        data_template_retained.resource_count_is("AWS::Backup::BackupPlan", 1)
+        data_template_retained.resource_count_is("AWS::Backup::BackupSelection", 1)
+
 
 class TestBackendStack:
     def test_kms_key_has_rotation_enabled(self, backend_template: Template) -> None:

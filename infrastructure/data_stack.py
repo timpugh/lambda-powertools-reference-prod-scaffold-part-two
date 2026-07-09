@@ -25,6 +25,7 @@ tighter, least-privilege key policy.
 from typing import Any
 
 from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
+from aws_cdk import aws_backup as backup
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_kms as kms
 from constructs import Construct
@@ -110,21 +111,63 @@ class DataStack(Stack):
             value=self.idempotency_table.table_name,
         )
 
-        # PITR is enabled (point-in-time recovery), but the nag packs also want
-        # the table enrolled in an AWS Backup plan. A backup plan is out of
-        # scope for this reference (PITR covers the rolling-window recovery a
-        # TTL'd idempotency cache needs); production forks that set
-        # retain_data=True should also add AWS Backup — see TODO.md.
-        acknowledge_rules(
-            self,
-            [
-                {
-                    "id": "NIST.800.53.R5-DynamoDBInBackupPlan",
-                    "reason": "AWS Backup plan not configured for sample app — PITR is enabled for point-in-time recovery",
-                },
-                {
-                    "id": "HIPAA.Security-DynamoDBInBackupPlan",
-                    "reason": "AWS Backup plan not configured for sample app — PITR is enabled for point-in-time recovery",
-                },
-            ],
-        )
+        if retain_data:
+            # Production posture: AWS Backup on top of PITR. PITR's rolling window
+            # (1 day here — records TTL out after an hour) covers oops-recovery;
+            # AWS Backup covers the compliance horizon: daily backups kept 35 days
+            # plus a monthly backup moved to cold storage and kept a year. The vault
+            # uses this stack's CMK (key lives with the data — module docstring) and
+            # is RETAINed like the table it protects. This retires the
+            # DynamoDBInBackupPlan suppressions in the retain shape; the
+            # destroy-friendly default keeps them below.
+            vault = backup.BackupVault(
+                self,
+                "IdempotencyBackupVault",
+                encryption_key=self.encryption_key,
+                removal_policy=RemovalPolicy.RETAIN,
+            )
+            plan = backup.BackupPlan(
+                self,
+                "IdempotencyBackupPlan",
+                backup_vault=vault,
+                backup_plan_rules=[
+                    backup.BackupPlanRule.daily(),
+                    backup.BackupPlanRule.monthly1_year(),
+                ],
+            )
+            plan.add_selection(
+                "IdempotencyTableSelection",
+                resources=[backup.BackupResource.from_dynamo_db_table(self.idempotency_table)],
+            )
+            # The selection's auto-created role uses the AWS-documented service policy.
+            acknowledge_rules(
+                plan,
+                [
+                    {
+                        "id": "AwsSolutions-IAM4",
+                        "reason": "AWSBackupServiceRolePolicyForBackup is the documented service role policy for AWS Backup selections",
+                        "applies_to": [
+                            "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup"
+                        ],
+                    },
+                ],
+            )
+        else:
+            # PITR-only in the destroy-friendly default: the idempotency cache is
+            # regenerable data; a backup plan would slow teardown for no recovery value.
+            # Reason text intentionally unchanged from before this feature — it's
+            # baked into the committed prod-shape snapshot's cdk_nag Metadata, and
+            # the default shape must stay template-identical.
+            acknowledge_rules(
+                self,
+                [
+                    {
+                        "id": "NIST.800.53.R5-DynamoDBInBackupPlan",
+                        "reason": "AWS Backup plan not configured for sample app — PITR is enabled for point-in-time recovery",
+                    },
+                    {
+                        "id": "HIPAA.Security-DynamoDBInBackupPlan",
+                        "reason": "AWS Backup plan not configured for sample app — PITR is enabled for point-in-time recovery",
+                    },
+                ],
+            )
