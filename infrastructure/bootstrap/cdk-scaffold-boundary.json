@@ -1,0 +1,110 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "cdk-scaffold-boundary: permissions boundary for the CDK bootstrap CloudFormationExecutionRole and every role this app creates. Deploy via `make bootstrap-boundary` BEFORE `cdk bootstrap --custom-permissions-boundary cdk-scaffold-boundary` and before any deploy of this app.",
+  "Resources": {
+    "BoundaryPolicy": {
+      "Type": "AWS::IAM::ManagedPolicy",
+      "Properties": {
+        "ManagedPolicyName": "cdk-scaffold-boundary",
+        "Description": "Maximum permissions for CDK-deployed roles in this scaffold. Allows the services the app uses; denies escalation past or tampering with the boundary itself.",
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AllowServiceActions",
+              "Effect": "Allow",
+              "Action": [
+                "apigateway:*",
+                "appconfig:*",
+                "applicationinsights:*",
+                "athena:*",
+                "backup:*",
+                "backup-storage:*",
+                "budgets:*",
+                "cloudformation:*",
+                "cloudfront:*",
+                "cloudtrail:*",
+                "cloudwatch:*",
+                "codebuild:*",
+                "codeconnections:*",
+                "codedeploy:*",
+                "codepipeline:*",
+                "codestar-connections:*",
+                "cognito-identity:*",
+                "dynamodb:*",
+                "events:*",
+                "glue:*",
+                "iam:*",
+                "kms:*",
+                "lambda:*",
+                "logs:*",
+                "resource-groups:*",
+                "rum:*",
+                "s3:*",
+                "secretsmanager:*",
+                "sns:*",
+                "sqs:*",
+                "ssm:*",
+                "sts:*",
+                "wafv2:*",
+                "xray:*"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "DenyBoundaryPolicyTampering",
+              "Effect": "Deny",
+              "Action": [
+                "iam:CreatePolicyVersion",
+                "iam:DeletePolicy",
+                "iam:DeletePolicyVersion",
+                "iam:SetDefaultPolicyVersion"
+              ],
+              "Resource": {
+                "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/cdk-scaffold-boundary"
+              }
+            },
+            {
+              "Sid": "DenyBoundaryRemoval",
+              "Effect": "Deny",
+              "Action": [
+                "iam:DeleteRolePermissionsBoundary",
+                "iam:DeleteUserPermissionsBoundary"
+              ],
+              "Resource": "*"
+            },
+            {
+              "Sid": "DenyRoleCreationWithoutBoundary",
+              "Effect": "Deny",
+              "Action": ["iam:CreateRole", "iam:CreateUser"],
+              "Resource": "*",
+              "Condition": {
+                "StringNotEquals": {
+                  "iam:PermissionsBoundary": {
+                    "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/cdk-scaffold-boundary"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "DenyBoundaryReplacement",
+              "Effect": "Deny",
+              "Action": [
+                "iam:PutRolePermissionsBoundary",
+                "iam:PutUserPermissionsBoundary"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringNotEquals": {
+                  "iam:PermissionsBoundary": {
+                    "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/cdk-scaffold-boundary"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

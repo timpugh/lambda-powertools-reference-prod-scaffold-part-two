@@ -47,7 +47,7 @@ CDK_ENV_ARG := $(if $(ENV),-c env=$(ENV))
 	lint lint-docs format typecheck security check-lock pr \
 	cdk-synth cdk-notices cdk-deprecations \
 	cdk-ls cdk-diff cdk-drift cdk-revert-drift cdk-diagnose cdk-gc cdk-rollback \
-	deploy deploy-appconfig-monitor destroy destroy-clean _empty-frontend-buckets _delete-straggler-log-groups \
+	deploy deploy-appconfig-monitor bootstrap-boundary destroy destroy-clean _empty-frontend-buckets _delete-straggler-log-groups \
 	docs docs-open docs-serve openapi compare-openapi coverage coverage-badge lock upgrade deps-merge clean clean-venvs
 
 help: ## Show this help message
@@ -307,6 +307,18 @@ deploy-appconfig-monitor: ## Redeploy with the AppConfig gradual rollout + alarm
 			echo "ERROR: backend stack $$stack is $$status, not an updatable *_COMPLETE state. Wait for a clean deploy before enabling the monitor."; exit 1; ;; \
 	esac
 	$(CDK) deploy '**' $(CDK_ENV_ARG) -c region=$(REGION) -c appconfig_monitor=true --require-approval never
+
+bootstrap-boundary: ## Deploy/update the cdk-scaffold-boundary IAM policy (run BEFORE re-bootstrapping or deploying)
+	# The permissions boundary must exist in the account before (a) `cdk
+	# bootstrap --custom-permissions-boundary cdk-scaffold-boundary` and
+	# (b) any deploy of this app — every app role now references it (see
+	# app_stage.BOUNDARY_POLICY_NAME). IAM managed policies are global;
+	# the stack region is irrelevant but pinned for determinism.
+	aws cloudformation deploy \
+		--template-file infrastructure/bootstrap/cdk-scaffold-boundary.json \
+		--stack-name CdkScaffoldBoundary \
+		--capabilities CAPABILITY_NAMED_IAM \
+		--region $(REGION)
 
 # --force skips the interactive "are you sure?" prompt, mirroring how
 # the deploy target uses --require-approval never. Without --force, the
