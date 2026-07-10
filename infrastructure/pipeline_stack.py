@@ -48,6 +48,24 @@ GITHUB_BRANCH = "main"
 DEV_ENV_NAME = "dev"
 
 
+def _with_literal_partition(finding_id: str) -> list[str]:
+    """Return both partition renderings of an ``applies_to`` finding id.
+
+    The in-process nag gate (``tests/cdk/test_pipeline_stack.py`` and every
+    other cdk-nag test fixture in this repo) synthesizes without cdk.json
+    context, so an unresolved partition renders as the ``<AWS::Partition>``
+    placeholder. The pipeline's own Synth step — and any CLI synth — runs
+    with cdk.json's ``@aws-cdk/core:enablePartitionLiterals: true`` +
+    ``target-partitions: ["aws"]``, which resolves the same ARN to a literal
+    ``arn:aws:...`` instead: a different exact finding id. Passing an id
+    through unchanged if it carries no placeholder keeps this safe to map
+    over every entry in an ``applies_to`` list, not just the ARN ones.
+    """
+    if "<AWS::Partition>" not in finding_id:
+        return [finding_id]
+    return [finding_id, finding_id.replace("<AWS::Partition>", "aws")]
+
+
 class PipelineStack(cdk.Stack):
     """CodePipeline (dev → integration tests → approval → prod), self-mutating."""
 
@@ -258,12 +276,36 @@ class PipelineStack(cdk.Stack):
         ``self.account`` rather than hardcoded: CDK Pipelines requires a
         concrete environment (see the ``PipelineStack`` construction site), so
         these are never unresolved tokens here, and the acknowledgment stays
-        correct once a real account replaces the test fixture's dummy one. The
-        CDK-generated logical-id hash suffixes embedded in a few CodeBuild
-        log-group/report-group ARNs (e.g. ``<CdBuildSynthCdkBuildProjectEB9D3AEF>``)
-        are pasted as printed — they're derived from the construct tree, not
-        from account/region, so they're stable as long as this method's
-        surrounding construct tree doesn't change shape.
+        correct once a real account replaces the test fixture's dummy one.
+
+        Two forward-looking fragility caveats baked into these literals:
+
+        1. The CDK-generated logical-id hash suffixes embedded in a few
+           CodeBuild log-group/report-group ARNs (e.g.
+           ``<CdBuildSynthCdkBuildProjectEB9D3AEF>``) are pasted as printed —
+           they're derived from the construct tree, not from account/region,
+           so they're stable across account/region but NOT across a
+           reshaping of this stack's construct tree (renaming/reordering the
+           pipeline's stages or CodeBuild steps regenerates the hash and
+           silently un-acknowledges these findings).
+        2. Every ``<AWS::Partition>`` entry is paired with its literal-``aws``
+           sibling via ``_with_literal_partition`` below. The in-process test
+           gate (``TestPipelineNagCompliance``, and every other cdk-nag test
+           fixture in this repo) synthesizes without cdk.json context, so
+           cdk-nag renders the unresolved partition pseudo-parameter as the
+           ``<AWS::Partition>`` placeholder. The pipeline's own Synth step —
+           and any CLI synth — runs with cdk.json's
+           ``@aws-cdk/core:enablePartitionLiterals: true`` +
+           ``target-partitions: ["aws"]``, which resolves the same ARNs to a
+           literal ``arn:aws:...`` instead, a different exact finding id the
+           placeholder-only acknowledgment would NOT match — surfacing these
+           findings as unacknowledged and failing
+           ``scripts/check_validation_report.py`` on the pipeline's very
+           first live run. Carrying both renderings keeps the CLI gate and
+           the test gate in lockstep; whichever rendering a given synth
+           doesn't produce simply matches nothing and suppresses nothing, so
+           it's harmless in both gates (see ``frontend_stack.py``'s RUM
+           cleanup / BucketDeployment acknowledgments for the same pattern).
         """
         region = self.region
         account = self.account
@@ -309,34 +351,38 @@ class PipelineStack(cdk.Stack):
                     "id": "AwsSolutions-IAM5",
                     "reason": iam5_reason,
                     "applies_to": [
-                        "Action::s3:GetObject*",
-                        "Action::s3:GetBucket*",
-                        "Action::s3:List*",
-                        "Action::s3:DeleteObject*",
-                        "Action::s3:Abort*",
-                        f"Resource::<{artifact_bucket_logical_id}.Arn>/*",
-                        "Action::kms:ReEncrypt*",
-                        "Action::kms:GenerateDataKey*",
-                        f"Resource::arn:<AWS::Partition>:logs:{region}:{account}:"
-                        "log-group:/aws/codebuild/<CdBuildSynthCdkBuildProjectEB9D3AEF>:*",
-                        f"Resource::arn:<AWS::Partition>:codebuild:{region}:{account}:"
-                        "report-group/<CdBuildSynthCdkBuildProjectEB9D3AEF>-*",
-                        f"Resource::arn:<AWS::Partition>:logs:{region}:{account}:"
-                        "log-group:/aws/codebuild/<CdDevIntegrationTestE94219AC>:*",
-                        f"Resource::arn:<AWS::Partition>:codebuild:{region}:{account}:"
-                        "report-group/<CdDevIntegrationTestE94219AC>-*",
-                        f"Resource::arn:<AWS::Partition>:cloudformation:{region}:{account}:"
-                        f"stack/ServerlessAppBackend-{DEV_ENV_NAME}-{region}/*",
-                        f"Resource::arn:<AWS::Partition>:cloudformation:{region}:{account}:"
-                        f"stack/ServerlessAppFrontend-{DEV_ENV_NAME}-{region}/*",
-                        f"Resource::arn:<AWS::Partition>:logs:{region}:{account}:"
-                        "log-group:/aws/codebuild/<PipelineUpdatePipelineSelfMutationDAA41400>:*",
-                        f"Resource::arn:<AWS::Partition>:codebuild:{region}:{account}:"
-                        "report-group/<PipelineUpdatePipelineSelfMutationDAA41400>-*",
-                        f"Resource::arn:*:iam::{account}:role/*",
-                        "Resource::*",
-                        f"Resource::arn:<AWS::Partition>:logs:{region}:{account}:log-group:/aws/codebuild/*",
-                        f"Resource::arn:<AWS::Partition>:codebuild:{region}:{account}:report-group/*",
+                        entry
+                        for raw in [
+                            "Action::s3:GetObject*",
+                            "Action::s3:GetBucket*",
+                            "Action::s3:List*",
+                            "Action::s3:DeleteObject*",
+                            "Action::s3:Abort*",
+                            f"Resource::<{artifact_bucket_logical_id}.Arn>/*",
+                            "Action::kms:ReEncrypt*",
+                            "Action::kms:GenerateDataKey*",
+                            f"Resource::arn:<AWS::Partition>:logs:{region}:{account}:"
+                            "log-group:/aws/codebuild/<CdBuildSynthCdkBuildProjectEB9D3AEF>:*",
+                            f"Resource::arn:<AWS::Partition>:codebuild:{region}:{account}:"
+                            "report-group/<CdBuildSynthCdkBuildProjectEB9D3AEF>-*",
+                            f"Resource::arn:<AWS::Partition>:logs:{region}:{account}:"
+                            "log-group:/aws/codebuild/<CdDevIntegrationTestE94219AC>:*",
+                            f"Resource::arn:<AWS::Partition>:codebuild:{region}:{account}:"
+                            "report-group/<CdDevIntegrationTestE94219AC>-*",
+                            f"Resource::arn:<AWS::Partition>:cloudformation:{region}:{account}:"
+                            f"stack/ServerlessAppBackend-{DEV_ENV_NAME}-{region}/*",
+                            f"Resource::arn:<AWS::Partition>:cloudformation:{region}:{account}:"
+                            f"stack/ServerlessAppFrontend-{DEV_ENV_NAME}-{region}/*",
+                            f"Resource::arn:<AWS::Partition>:logs:{region}:{account}:"
+                            "log-group:/aws/codebuild/<PipelineUpdatePipelineSelfMutationDAA41400>:*",
+                            f"Resource::arn:<AWS::Partition>:codebuild:{region}:{account}:"
+                            "report-group/<PipelineUpdatePipelineSelfMutationDAA41400>-*",
+                            f"Resource::arn:*:iam::{account}:role/*",
+                            "Resource::*",
+                            f"Resource::arn:<AWS::Partition>:logs:{region}:{account}:log-group:/aws/codebuild/*",
+                            f"Resource::arn:<AWS::Partition>:codebuild:{region}:{account}:report-group/*",
+                        ]
+                        for entry in _with_literal_partition(raw)
                     ],
                 },
                 {"id": "NIST.800.53.R5-IAMNoInlinePolicy", "reason": inline_policy_reason},
