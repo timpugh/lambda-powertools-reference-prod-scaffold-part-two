@@ -137,6 +137,38 @@ def validate_ssm_param_path(raw: str | None) -> str | None:
     return raw
 
 
+# CodeConnections connection ARNs (the service was renamed from
+# codestar-connections in 2024; pre-rename connections keep the old service
+# segment, so both are accepted). Region/account left loose — IAM validates
+# them at deploy; this only catches paste errors at synth.
+_CODE_CONNECTION_ARN_RE = re.compile(
+    r"^arn:aws:(codeconnections|codestar-connections):[a-z0-9-]+:\d{12}:connection/[A-Za-z0-9-]+$"
+)
+
+
+def validate_code_connection_arn(raw: str | None) -> str:
+    """Validate the `code_connection_arn` context key at synth time.
+
+    Unlike :func:`validate_ssm_param_path` this key is REQUIRED (in pipeline
+    mode there is no default source to fall back to), so ``None`` is an
+    error pointing at the one-time console handshake, not a pass-through.
+    """
+    if raw is None:
+        raise ValueError(
+            "Missing CDK context key 'code_connection_arn' (required with -c pipeline=true). "
+            "Complete the one-time CodeConnections handshake in the console (Developer Tools "
+            "> Connections > Create connection > GitHub), then set the connection ARN in "
+            "cdk.json or pass -c code_connection_arn=arn:aws:codeconnections:..."
+        )
+    if not _CODE_CONNECTION_ARN_RE.match(raw):
+        raise ValueError(
+            f"Invalid value for CDK context key 'code_connection_arn': {raw!r}. "
+            "Expected a connection ARN like "
+            "arn:aws:codeconnections:us-east-1:123456789012:connection/<uuid>."
+        )
+    return raw
+
+
 def stage_id(env_name: str, region: str) -> str:
     """Compose the Stage construct id for an environment + region pair.
 

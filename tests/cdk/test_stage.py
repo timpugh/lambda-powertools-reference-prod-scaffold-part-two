@@ -35,6 +35,7 @@ from infrastructure.app_stage import (
     DEFAULT_ENV_NAME,
     AppStage,
     parse_context_flag,
+    validate_code_connection_arn,
     validate_env_name,
     validate_ssm_param_path,
 )
@@ -388,3 +389,34 @@ class TestPermissionsBoundary:
     def test_backend_actually_has_roles(self, prod_stage: AppStage) -> None:
         # Guard against the parametrized test passing vacuously.
         assert Template.from_stack(prod_stage.backend).find_resources("AWS::IAM::Role")
+
+
+class TestCodeConnectionArnValidation:
+    """Pipeline mode requires a well-formed CodeConnections ARN, fail-loud at synth."""
+
+    VALID = "arn:aws:codeconnections:us-east-1:111111111111:connection/12345678-abcd-4ef0-9876-0123456789ab"
+    VALID_LEGACY = "arn:aws:codestar-connections:us-east-1:111111111111:connection/12345678-abcd-4ef0-9876-0123456789ab"
+
+    def test_valid_arn_passes_through(self) -> None:
+        assert validate_code_connection_arn(self.VALID) == self.VALID
+
+    def test_legacy_codestar_service_name_accepted(self) -> None:
+        # Connections created before the 2024 rename still carry the old service name.
+        assert validate_code_connection_arn(self.VALID_LEGACY) == self.VALID_LEGACY
+
+    def test_missing_arn_fails_with_handshake_hint(self) -> None:
+        with pytest.raises(ValueError, match="CodeConnections"):
+            validate_code_connection_arn(None)
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "",
+            "not-an-arn",
+            "arn:aws:s3:::bucket",
+            "arn:aws:codeconnections:us-east-1:111111111111:host/12345678-abcd-4ef0-9876-0123456789ab",
+        ],
+    )
+    def test_malformed_arns_fail_at_synth(self, bad: str) -> None:
+        with pytest.raises(ValueError, match="code_connection_arn"):
+            validate_code_connection_arn(bad)
