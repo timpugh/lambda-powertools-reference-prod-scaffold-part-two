@@ -44,6 +44,7 @@ This application provisions Lambda, API Gateway, DynamoDB, SSM Parameter Store, 
 - [Getting started](#getting-started) — [Prerequisites](#prerequisites) · [Quick start](#quick-start) · [Makefile](#makefile) · [Editor setup (VS Code)](#editor-setup-vs-code)
 - [Architecture](#architecture) — [CDK best practices](#cdk-best-practices) · [Lambda Powertools features](#lambda-powertools-features) · [AWS resources provisioned](#aws-resources-provisioned) · [Stack and construct composition](#stack-and-construct-composition) · [Stateful data stack and `retain_data`](#stateful-data-stack-and-retain_data) · [Deployment safety](#deployment-safety-canary-lambda) · [Audit stack and log retention](#audit-stack-and-log-retention) · [Frontend stack](#frontend-stack) · [Same-origin API and origin lockdown](#same-origin-api-and-origin-lockdown) · [Monitoring](#monitoring) · [Cost overview](#cost-overview)
 - [Deploy the application](#deploy-the-application) — [Recommended order](#recommended-order-for-ongoing-deploys) · [Ephemeral environment](#deploying-an-ephemeral-environment) · [Different region](#deploying-to-a-different-region) · [Destroying](#destroying-a-deployment) · [Cleanup](#cleanup)
+- [CI/CD pipeline](#cicd-pipeline) — [One-time setup](#one-time-setup) · [Operating the pipeline](#operating-the-pipeline) · [Cost](#cost)
 - [Working in the codebase](#working-in-the-codebase) — [Add a resource](#add-a-resource-to-your-application) · [Useful CDK commands](#useful-cdk-commands) · [Synthesize and validate locally](#synthesize-and-validate-locally) · [Debugging the Lambda function](#debugging-the-lambda-function) · [Fetch, tail, and filter logs](#fetch-tail-and-filter-lambda-function-logs) · [Commit message convention](#commit-message-convention) · [Cutting a release](#cutting-a-release) · [Documentation](#documentation)
 - [Quality and security](#quality-and-security) — [Tests](#tests) · [Linting and static analysis](#linting-and-static-analysis) · [Detecting deprecated APIs](#detecting-deprecated-apis) · [Pre-commit hooks](#pre-commit-hooks) · [Security](#security) · [CDK security checks](#cdk-security-checks) · [pyproject.toml configuration](#pyprojecttoml-configuration)
 - [CI/CD](#cicd) — [GitHub Actions](#github-actions)
@@ -933,6 +934,56 @@ pending deletion and it auto-deletes when the window elapses; run `aws kms cance
 you tore down by mistake.) The other caveat is the async-log-bucket race
 described above — use `make destroy-clean` (or the documented two-step recovery) so a late-arriving
 CloudFront log doesn't leave the frontend stack stuck in `DELETE_FAILED`.
+
+## CI/CD pipeline
+
+`app.py` is mode-switched: `-c pipeline=true` synthesizes [`PipelineStack`](infrastructure/pipeline_stack.py) ("ServerlessAppPipeline") instead of the directly-deployable `AppStage` that `make deploy` and ephemeral `ENV=` deploys still use. The pipeline is a self-mutating [CDK Pipelines](https://docs.aws.amazon.com/cdk/v2/guide/cdk_pipeline.html) `pipelines.CodePipeline`, sourced from this repo's GitHub `main` via a [CodeConnections](https://docs.aws.amazon.com/dtconsole/latest/userguide/welcome-connections.html) connection, with its own nag-gated Synth step, a persistent `dev` environment, live integration tests, a manual approval, and prod:
+
+```text
+GitHub main ──(CodeConnections)──▶ Synth (CodeBuild, Docker-privileged)
+                                     • npm ci, uv sync (.venv / cdk group)
+                                     • npx cdk synth -c pipeline=true '**'
+                                     • scripts/check_validation_report.py   ← nag gate inside the pipeline
+                                  ▶ SelfMutate
+                                  ▶ Deploy AppStage(env_name="dev")         ← persistent, retain_data=false
+                                  ▶ Post: integration tests against dev     ← .venv-lambda, exported stack names
+                                  ▶ ManualApprovalStep("PromoteToProd")
+                                  ▶ Deploy AppStage(env_name="prod")        ← legacy stack names
+```
+
+**`prod` is adopted in place.** `env_name="prod"` composes the same legacy stack names (`ServerlessAppBackend-us-east-1` etc.) every other deploy path uses, so the pipeline's prod stage updates the existing production stacks rather than standing up a parallel copy — no migration step. `make deploy` remains the tool for ephemeral `ENV=<name>` environments; the pipeline doesn't replace it.
+
+**`dev` is pipeline-reserved.** `DEV_ENV_NAME = "dev"` in `infrastructure/pipeline_stack.py` names a persistent environment the pipeline deploys and integration-tests against on every run, never tearing it down. A manual `make deploy ENV=dev` would fight the pipeline over the same five stacks — pick any other env name for an ephemeral copy.
+
+### One-time setup
+
+Four steps, in order, before the pipeline can exist:
+
+```bash
+make bootstrap-boundary                                                    # 1. deploy/update the cdk-scaffold-boundary IAM policy
+npx cdk bootstrap aws://YOUR_ACCOUNT_ID/us-east-1 --custom-permissions-boundary cdk-scaffold-boundary   # 2. re-bootstrap with the boundary attached
+# 3. Console: Developer Tools → Connections → Create connection → GitHub →
+#    authorize the GitHub App on timpugh/lambda-powertools-reference-prod-scaffold-part-one.
+#    Paste the resulting connection ARN into cdk.json as "code_connection_arn"
+#    (an ARN, not a secret — safe to commit; cdk.json already documents the key).
+make deploy-pipeline                                                        # 4. birth the pipeline (or: make deploy-pipeline CONN=<arn> before committing it)
+```
+
+Step 1 deploys [`infrastructure/bootstrap/cdk-scaffold-boundary.json`](infrastructure/bootstrap/cdk-scaffold-boundary.json) — a standalone CloudFormation template, not part of the CDK app — as the `cdk-scaffold-boundary` managed policy. Step 4 is a one-time `cdk deploy ServerlessAppPipeline -c pipeline=true`; after it, the pipeline self-mutates from GitHub `main` on every push, so rerunning the target is only needed if the pipeline stack is ever deleted.
+
+### Operating the pipeline
+
+**Cold-deploy sequencing, now twice.** Both first deploys — `dev` on the pipeline's first run, `prod` on the first approved promotion — happen with `appconfig_monitor=false` (the default), same as any other cold deploy. Flip it on only after **both** environments' `FeatureFlagEvaluationFailure` metrics have reported at least one datapoint; see [Deployment safety](#deployment-safety-canary-lambda) for why a monitor on a cold stack aborts `CREATE_COMPLETE`. Set `"appconfig_monitor": true` in `cdk.json` once both environments have cleared this — the pipeline's Synth step reads the same `cdk.json`, so the change ships on the next pipeline run.
+
+**Export-retention interaction.** The pipeline's first prod deploy counts as the "deploy once with the export retained" half of the two-deploy recipe already in place for `backend_stack.py`'s temporary `export_value()` and for the `OriginVerifySecret` rotation recipe (see [TODO.md](TODO.md#infrastructure)) — don't remove either retained export until the pipeline has deployed prod at least once.
+
+**Self-mutation is expected, not stuck.** The underlying `codepipeline.Pipeline` sets `restart_execution_on_update=True`, so a change to the pipeline's own definition (a new stage, a new CodeBuild step) makes the *current* run update the pipeline and restart itself as the next run. A pipeline execution ending early followed immediately by a new one is normal self-mutation, not a hung pipeline.
+
+**The permissions boundary is now load-bearing for every deploy, not just the pipeline's.** `AppStage` and `PipelineStack` both pass `permissions_boundary=cdk.PermissionsBoundary.from_name("cdk-scaffold-boundary")` unconditionally, so `make bootstrap-boundary` (One-time setup, step 1) is a prerequisite before `make deploy`/`make deploy ENV=<name>` too — a role that references a missing boundary policy fails deploy with an IAM error. A boundary-blocked action fails at **deploy or runtime**, not at synth: `cdk synth` and cdk-nag have no visibility into the boundary policy's allow-list, so a permission the app needs but the boundary denies surfaces mid-deploy or the first time the runtime role tries the call.
+
+### Cost
+
+CodePipeline (~$1/month active pipeline), CodeBuild minutes per run, one additional KMS key (~$1/month), standing dev environment (serverless, mostly per-request). Modest relative to the existing stack.
 
 ## Working in the codebase
 
