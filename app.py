@@ -53,6 +53,16 @@ value namespaces every stack (``ServerlessAppBackend-{env}-{region}``), which ma
 ephemeral per-developer or per-branch deployments collision-free in a
 shared account, and disables alarm paging for them.
 
+The ``pipeline`` CDK context key (``-c pipeline=true``) switches this file to
+synthesize :class:`PipelineStack`, the self-mutating CD pipeline, instead of a
+directly-deployable :class:`AppStage`. It defaults to ``false``, keeping
+``make deploy`` and ephemeral ``env`` deploys on the legacy direct-Stage
+shape. Pipeline mode requires ``code_connection_arn`` (the ARN from the
+one-time CodeConnections console handshake — see
+``infrastructure.app_stage.validate_code_connection_arn``) and rejects any
+``env`` context value outright: the pipeline owns its own ``dev`` and ``prod``
+environments end to end, so an ``-c env`` override would silently do nothing.
+
 Usage:
     cdk deploy --all                            # prod stage in us-east-1 (default)
     cdk deploy --all -c region=ap-southeast-1   # separate Singapore Stage
@@ -75,9 +85,11 @@ from infrastructure.app_stage import (
     AppStage,
     parse_context_flag,
     stage_id,
+    validate_code_connection_arn,
     validate_ssm_param_path,
 )
 from infrastructure.nag_utils import attach_nag_packs
+from infrastructure.pipeline_stack import PipelineStack
 
 app = cdk.App()
 
@@ -119,17 +131,53 @@ appconfig_monitor: bool = parse_context_flag(app.node.try_get_context("appconfig
 # Default None keeps CDK's auto-generated name; validated at synth (fail-loud like retain_data).
 ssm_param_path: str | None = validate_ssm_param_path(app.node.try_get_context("ssm_param_path"))
 
-# Stage id composition lives next to the Stage (app_stage.stage_id):
-# prod keeps the legacy id so existing cdk.out assembly paths and tooling
-# keyed on the stage name stay stable; other envs get their own id.
-AppStage(
-    app,
-    stage_id(env_name, target_region),
-    region=target_region,
-    env_name=env_name,
-    retain_data=retain_data,
-    appconfig_monitor=appconfig_monitor,
-    ssm_param_path=ssm_param_path,
-)
+# Pipeline mode (`-c pipeline=true`): synthesize the self-mutating CD
+# pipeline instead of a directly-deployable stage. The pipeline embeds
+# AppStage twice (dev + prod) — see infrastructure/pipeline_stack.py and
+# README "CI/CD pipeline". Default False keeps this file's legacy shape:
+# `make deploy` and ephemeral ENV deploys are untouched.
+pipeline_mode: bool = parse_context_flag(app.node.try_get_context("pipeline"), "pipeline")
+
+if pipeline_mode:
+    # The pipeline owns its environments (dev + prod); an -c env override
+    # here would silently do nothing, so fail loud instead.
+    if app.node.try_get_context("env") is not None:
+        raise ValueError(
+            "The 'env' context key has no effect with -c pipeline=true — the pipeline "
+            "deploys its own 'dev' and 'prod' environments. Drop -c env, or drop "
+            "-c pipeline=true for a direct ephemeral deploy."
+        )
+    # CDK Pipelines deploys concrete environments, so the pipeline stack
+    # needs an explicit account. The CDK CLI resolves CDK_DEFAULT_ACCOUNT
+    # from the active AWS credentials at synth.
+    account = os.environ.get("CDK_DEFAULT_ACCOUNT")
+    if not account:
+        raise ValueError(
+            "CDK_DEFAULT_ACCOUNT is not set — pipeline mode needs AWS credentials at "
+            "synth so the pipeline stack gets a concrete account (run via the cdk CLI "
+            "with credentials, e.g. `make deploy-pipeline`)."
+        )
+    PipelineStack(
+        app,
+        "ServerlessAppPipeline",
+        code_connection_arn=validate_code_connection_arn(app.node.try_get_context("code_connection_arn")),
+        retain_data=retain_data,
+        appconfig_monitor=appconfig_monitor,
+        ssm_param_path=ssm_param_path,
+        env=cdk.Environment(account=account, region=target_region),
+    )
+else:
+    # Stage id composition lives next to the Stage (app_stage.stage_id):
+    # prod keeps the legacy id so existing cdk.out assembly paths and tooling
+    # keyed on the stage name stay stable; other envs get their own id.
+    AppStage(
+        app,
+        stage_id(env_name, target_region),
+        region=target_region,
+        env_name=env_name,
+        retain_data=retain_data,
+        appconfig_monitor=appconfig_monitor,
+        ssm_param_path=ssm_param_path,
+    )
 
 app.synth()
