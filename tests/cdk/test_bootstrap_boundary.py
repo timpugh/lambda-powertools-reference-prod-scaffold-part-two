@@ -54,6 +54,7 @@ def test_boundary_policy_cannot_be_tampered_with() -> None:
 
 def test_boundary_cannot_be_removed_from_principals() -> None:
     deny = _by_sid("DenyBoundaryRemoval")
+    assert deny["Effect"] == "Deny"
     assert set(deny["Action"]) == {
         "iam:DeleteRolePermissionsBoundary",
         "iam:DeleteUserPermissionsBoundary",
@@ -61,7 +62,24 @@ def test_boundary_cannot_be_removed_from_principals() -> None:
 
 
 def test_new_principals_require_the_boundary() -> None:
-    for sid in ("DenyRoleCreationWithoutBoundary", "DenyBoundaryReplacement"):
+    for sid in (
+        "DenyRoleCreationWithoutBoundary",
+        "DenyBoundaryReplacement",
+        "DenyPolicyEditsOnUnboundedPrincipals",
+    ):
         deny = _by_sid(sid)
+        assert deny["Effect"] == "Deny"
         cond = deny["Condition"]["StringNotEquals"]["iam:PermissionsBoundary"]
         assert cond == {"Fn::Sub": BOUNDARY_ARN_SUB}
+
+
+def test_policy_edits_denied_on_unbounded_principals() -> None:
+    deny = _by_sid("DenyPolicyEditsOnUnboundedPrincipals")
+    assert deny["Effect"] == "Deny"
+    assert set(deny["Action"]) == {
+        "iam:AttachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:AttachUserPolicy",
+        "iam:PutUserPolicy",
+    }
+    assert deny["Resource"] == "*"

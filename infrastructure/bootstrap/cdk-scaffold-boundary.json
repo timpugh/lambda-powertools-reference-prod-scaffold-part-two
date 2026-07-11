@@ -101,6 +101,24 @@
                   }
                 }
               }
+            },
+            {
+              "Sid": "DenyPolicyEditsOnUnboundedPrincipals",
+              "Effect": "Deny",
+              "Action": [
+                "iam:AttachRolePolicy",
+                "iam:PutRolePolicy",
+                "iam:AttachUserPolicy",
+                "iam:PutUserPolicy"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "StringNotEquals": {
+                  "iam:PermissionsBoundary": {
+                    "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/cdk-scaffold-boundary"
+                  }
+                }
+              }
             }
           ]
         }
