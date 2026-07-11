@@ -89,6 +89,15 @@ repos:
       - id: detect-private-key             # blocks accidental SSH / TLS key commits
       - id: check-merge-conflict           # blocks unresolved <<<<<<< markers
       - id: check-added-large-files        # blocks committing large binaries
+        # tests/cdk/snapshots/ holds committed, code-reviewed, git-diffable
+        # CDK template snapshots (test_snapshots.py), not accidental binaries —
+        # the risk this hook exists for. The pipeline snapshot alone is ~630KB:
+        # CDK Pipelines synthesizes TWO full nested AppStages (dev + prod, five
+        # stacks each) and a dedicated CodeBuild asset-publishing project per
+        # file asset, well past the default 500KB ceiling on a legitimate,
+        # reviewed artifact. Scoped to this one directory so the check still
+        # guards every other path in the repo at the default threshold.
+        exclude: ^tests/cdk/snapshots/
       - id: check-executables-have-shebangs # catches missing shebangs (scripts/deps_merge.sh, etc.)
 
   - repo: local
