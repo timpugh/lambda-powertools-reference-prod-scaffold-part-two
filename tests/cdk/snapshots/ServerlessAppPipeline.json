@@ -1472,6 +1472,23 @@
             ],
             "Name": "Prod"
           }
+        ],
+        "Triggers": [
+          {
+            "GitConfiguration": {
+              "Push": [
+                {
+                  "Branches": {
+                    "Includes": [
+                      "main"
+                    ]
+                  }
+                }
+              ],
+              "SourceActionName": "timpugh_lambda-powertools-reference-prod-scaffold-part-two"
+            },
+            "ProviderType": "CodeStarSourceConnection"
+          }
         ]
       },
       "Type": "AWS::CodePipeline::Pipeline"

@@ -203,7 +203,46 @@ class PipelineStack(cdk.Stack):
         # the final construct tree (build_pipeline is otherwise deferred to
         # synth, after which acknowledgments can no longer be attached).
         self.pipeline.build_pipeline()
+        self._declare_push_trigger()
         self._acknowledge_pipeline_findings()
+
+    def _declare_push_trigger(self) -> None:
+        """Explicitly declare the on-push trigger the V2 pipeline needs.
+
+        CDK synthesizes this pipeline as type V2 with NO ``Triggers`` block,
+        and V2 pipelines do NOT inherit V1's connection-based change
+        detection — live-proven here: pushes to ``main`` started zero
+        executions; every run was CreatePipeline or the
+        ``restart_execution_on_update`` restart, which masked the gap because
+        early pushes coincided with workstation redeploys. The explicit git
+        push trigger below is what makes push-to-deploy actually work.
+
+        Applied as a CFN property override because ``pipelines.CodePipeline``
+        creates the source action internally — the L2 ``triggers=`` prop
+        needs the action object, which doesn't exist until
+        ``build_pipeline()`` has run (hence this method's call-site ordering).
+        The source action's name is CDK-derived from the repo slug
+        (slashes -> underscores).
+        """
+        cfn_pipeline = self.pipeline.pipeline.node.default_child
+        if not isinstance(cfn_pipeline, codepipeline.CfnPipeline):
+            raise TypeError(
+                f"Expected the pipeline's default child to be CfnPipeline, got "
+                f"{type(cfn_pipeline).__name__} — the CDK Pipelines internals changed; "
+                "re-anchor _declare_push_trigger's escape hatch."
+            )
+        cfn_pipeline.add_property_override(
+            "Triggers",
+            [
+                {
+                    "ProviderType": "CodeStarSourceConnection",
+                    "GitConfiguration": {
+                        "SourceActionName": GITHUB_REPO.replace("/", "_"),
+                        "Push": [{"Branches": {"Includes": [GITHUB_BRANCH]}}],
+                    },
+                }
+            ],
+        )
 
     def _add_stages(
         self,

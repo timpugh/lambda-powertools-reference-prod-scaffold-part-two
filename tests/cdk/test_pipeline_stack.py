@@ -72,6 +72,33 @@ class TestPipelineCore:
             ),
         )
 
+    def test_push_trigger_is_explicitly_declared(self, pipeline_template: Template) -> None:
+        # CDK synthesizes a V2 pipeline with no Triggers block, and V2 does
+        # NOT inherit V1's connection-based change detection — live-proven:
+        # pushes started zero executions until this block existed. If this
+        # assertion fails, push-to-deploy is broken even though every stage
+        # still works when started by hand.
+        pipeline_template.has_resource_properties(
+            "AWS::CodePipeline::Pipeline",
+            Match.object_like(
+                {
+                    "Triggers": [
+                        Match.object_like(
+                            {
+                                "ProviderType": "CodeStarSourceConnection",
+                                "GitConfiguration": Match.object_like(
+                                    {
+                                        "SourceActionName": "timpugh_lambda-powertools-reference-prod-scaffold-part-two",
+                                        "Push": [{"Branches": {"Includes": ["main"]}}],
+                                    }
+                                ),
+                            }
+                        )
+                    ]
+                }
+            ),
+        )
+
     def test_synth_codebuild_is_docker_privileged(self, pipeline_template: Template) -> None:
         pipeline_template.has_resource_properties(
             "AWS::CodeBuild::Project",
