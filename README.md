@@ -975,6 +975,30 @@ make deploy-pipeline                                                        # 4.
 
 Step 1 deploys [`infrastructure/bootstrap/cdk-scaffold-boundary.json`](infrastructure/bootstrap/cdk-scaffold-boundary.json) — a standalone CloudFormation template, not part of the CDK app — as the `cdk-scaffold-boundary` managed policy. **The connection ARN never lands in the repo** (it embeds the account id, and this repo is public) or in your shell profile: `make deploy-pipeline` resolves it at deploy time — `CONN=<arn>` argument, else `CODE_CONNECTION_ARN` in a gitignored `./.env` (the project-scoped home if you want one), else auto-discovery of the account's single AVAILABLE GitHub connection (fail-loud if zero or several) — and passes it to this one workstation-side `cdk deploy`. From then on the pipeline is self-sufficient: the ARN rides in its own Synth step's CodeBuild environment (`CODE_CONNECTION_ARN`, see `pipeline_stack.py`), which `app.py` falls back to when the context key is absent, so every self-mutation synth re-embeds it without the repo ever carrying it. Rotating the connection = rerun `make deploy-pipeline` with the new one resolvable. Step 4 is otherwise a one-time `cdk deploy ServerlessAppPipeline -c pipeline=true`; after it, the pipeline self-mutates from GitHub `main` on every push, so rerunning the target is only needed if the pipeline stack is ever deleted or the connection rotated.
 
+### Where the connection ARN lives
+
+Three homes, none of them tracked by git or touching your shell profile:
+
+| Home | Who writes it | Who reads it |
+|---|---|---|
+| Gitignored `./.env` at the repo root (optional) | You, once, after the handshake | Only `make deploy-pipeline`, transiently |
+| Auto-discovery (no home at all) | Nobody — queried from the account | `make deploy-pipeline`, when `CONN=` and `./.env` are absent |
+| The pipeline's own Synth CodeBuild environment (AWS-side) | The birth deploy, automatically | Every self-mutation synth (`app.py`'s `CODE_CONNECTION_ARN` fallback) |
+
+**If you want the project-scoped copy** — the `.env` route — create a file named `.env` at the repo root containing one line:
+
+```bash
+CODE_CONNECTION_ARN=arn:aws:codeconnections:us-east-1:YOUR_ACCOUNT_ID:connection/YOUR_CONNECTION_UUID
+```
+
+or from the terminal:
+
+```bash
+echo 'CODE_CONNECTION_ARN=arn:aws:codeconnections:...' > .env
+```
+
+`.env` is already covered by `.gitignore`, nothing exports it into your shell environment, and `make deploy-pipeline` sources it only for the duration of that one command. **If you skip `.env` entirely, nothing is lost**: `make deploy-pipeline` lists the account's AVAILABLE GitHub connections and uses the single one it finds — you never see or type the ARN. The AWS-side copy (the third row) is managed for you: the birth deploy bakes it into the Synth project's environment variables, where it is inspectable in the CodeBuild console but never needs manual editing.
+
 ### Operating the pipeline
 
 **Cold-deploy sequencing, now twice.** Both first deploys — `dev` on the pipeline's first run, `prod` on the first approved promotion — happen with `appconfig_monitor=false` (the default), same as any other cold deploy. Flip it on only after **both** environments' `FeatureFlagEvaluationFailure` metrics have reported at least one datapoint; see [Deployment safety](#deployment-safety-canary-lambda) for why a monitor on a cold stack aborts `CREATE_COMPLETE`. Set `"appconfig_monitor": true` in `cdk.json` once both environments have cleared this — the pipeline's Synth step reads the same `cdk.json`, so the change ships on the next pipeline run. If `cdk.json` already carries `"appconfig_monitor": true` from pre-pipeline operation, remove it before running `make deploy-pipeline` — the pipeline's `dev` stage is a cold stack on its first run, and restore the flag only after both environments' `FeatureFlagEvaluationFailure` metrics report.
