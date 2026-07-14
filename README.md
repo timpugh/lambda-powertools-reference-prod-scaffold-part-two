@@ -752,6 +752,18 @@ One synth-time gotcha worth knowing: `monitor_api_gateway` derives alarm names a
 
 Ephemeral environments (`ENV=<name>` deploys) keep the dashboard and alarms but skip the SNS topic entirely — a per-branch stack should never page anyone — with the NIST/HIPAA alarm-action rules suppressed for that shape only.
 
+### Tearing it all down
+
+Order matters — pipeline first, so no execution can interfere mid-teardown; environments after, via their env-aware sweeps:
+
+```bash
+make destroy-pipeline        # the pipeline stack + a sweep of its provider log-group re-creations
+make destroy-clean ENV=dev   # the pipeline-reserved dev environment (five stacks + sweeps)
+make destroy-clean           # prod (legacy names; five stacks + sweeps)
+```
+
+What deliberately survives: the `cdk-scaffold-boundary` policy, the `CDKToolkit` bootstrap stack, and the CodeConnections connection — account-level, one-time prerequisites, reused by the next deployment (or the next fork in the same account). `make destroy-pipeline` works even if the connection is already gone: destroy only *synthesizes* the ARN, so a dummy fallback suffices. The target's post-destroy sweep exists for a live-caught trap: stack deletion removes the CFN-owned provider log group first, then the artifact bucket's auto-delete-objects Lambda runs and *re-creates* its `/aws/lambda/ServerlessAppPipeline-*` log group by logging — at never-expire retention — the same re-appearance class `destroy-clean` already sweeps for the app stacks.
+
 ### Cost overview
 
 Most of the architecture is pay-per-use and costs effectively **nothing at idle** — Lambda, API Gateway, DynamoDB (on-demand), S3, CloudTrail data events, Athena, RUM, SNS, and CloudWatch all bill per request/event/GB, so a no-traffic stack's bill is dominated by a handful of *fixed* monthly charges. The detailed rationale for each line lives in its own section; this table consolidates the picture for a fork doing cost planning. Figures are list price, us-east-1, per deployed region + environment.

@@ -47,7 +47,7 @@ CDK_ENV_ARG := $(if $(ENV),-c env=$(ENV))
 	lint lint-docs format typecheck security check-lock pr \
 	cdk-synth cdk-notices cdk-deprecations \
 	cdk-ls cdk-diff cdk-drift cdk-revert-drift cdk-diagnose cdk-gc cdk-rollback \
-	deploy deploy-appconfig-monitor bootstrap-boundary deploy-pipeline destroy destroy-clean _empty-frontend-buckets _delete-straggler-log-groups \
+	deploy deploy-appconfig-monitor bootstrap-boundary deploy-pipeline destroy-pipeline destroy destroy-clean _empty-frontend-buckets _delete-straggler-log-groups \
 	docs docs-open docs-serve openapi compare-openapi coverage coverage-badge lock upgrade deps-merge clean clean-venvs
 
 help: ## Show this help message
@@ -355,6 +355,33 @@ deploy-pipeline: ## One-time deploy of the CD pipeline (self-mutates afterwards)
 	fi; \
 	$(CDK) deploy ServerlessAppPipeline -c pipeline=true \
 		-c code_connection_arn="$$conn" --require-approval never
+
+destroy-pipeline: ## Destroy the CD pipeline stack and sweep its provider log-group re-creations
+	# Synth needs a valid-SHAPED connection ARN (app.py fail-louds without
+	# one), but destroy never uses its VALUE against AWS — so CONN=/.env are
+	# honored when present and a dummy ARN is the fallback, which keeps
+	# teardown working even after the connection itself was deleted.
+	#
+	# The post-destroy sweep exists for a live-caught trap (part-two teardown
+	# cycle): stack deletion removes the CFN-owned provider log group FIRST,
+	# then the auto-delete-objects provider Lambda runs (emptying the artifact
+	# bucket) and RE-CREATES /aws/lambda/ServerlessAppPipeline-* by logging —
+	# at never-expire retention. Same class of re-appearance destroy-clean
+	# sweeps for the app stacks; scoped here to this stack's name.
+	@set -e; \
+	conn="$(CONN)"; \
+	if [ -z "$$conn" ] && [ -f .env ]; then conn=$$(sh -c '. ./.env >/dev/null 2>&1; printf "%s" "$$CODE_CONNECTION_ARN"'); fi; \
+	[ -z "$$conn" ] && conn="arn:aws:codeconnections:us-east-1:000000000000:connection/00000000-0000-4000-8000-000000000000"; \
+	$(CDK) destroy ServerlessAppPipeline -c pipeline=true -c code_connection_arn="$$conn" --force; \
+	for i in 1 2; do \
+		for lg in $$(aws logs describe-log-groups --region $(REGION) \
+			--query "logGroups[?contains(logGroupName, 'ServerlessAppPipeline')].logGroupName" --output text); do \
+			echo "  sweeping re-created log group $$lg"; \
+			aws logs delete-log-group --log-group-name "$$lg" --region $(REGION) || true; \
+		done; \
+		[ $$i -eq 1 ] && sleep 60; \
+	done; \
+	echo "pipeline destroyed and swept"
 
 # --force skips the interactive "are you sure?" prompt, mirroring how
 # the deploy target uses --require-approval never. Without --force, the
