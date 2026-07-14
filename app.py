@@ -57,11 +57,18 @@ The ``pipeline`` CDK context key (``-c pipeline=true``) switches this file to
 synthesize :class:`PipelineStack`, the self-mutating CD pipeline, instead of a
 directly-deployable :class:`AppStage`. It defaults to ``false``, keeping
 ``make deploy`` and ephemeral ``env`` deploys on the legacy direct-Stage
-shape. Pipeline mode requires ``code_connection_arn`` (the ARN from the
-one-time CodeConnections console handshake — see
-``infrastructure.app_stage.validate_code_connection_arn``) and rejects any
-``env`` context value outright: the pipeline owns its own ``dev`` and ``prod``
-environments end to end, so an ``-c env`` override would silently do nothing.
+shape. Pipeline mode requires the CodeConnections connection ARN (from the
+one-time console handshake — see
+``infrastructure.app_stage.validate_code_connection_arn``), resolved from the
+``code_connection_arn`` context key or, failing that, the
+``CODE_CONNECTION_ARN`` environment variable. The ARN is deliberately NOT
+committed (it embeds the account id; the repo is public): ``make
+deploy-pipeline`` auto-discovers it from the account for the workstation
+birth deploy, and the pipeline's own synth step reads it from an env var
+baked into its CodeBuild definition (see ``pipeline_stack.py``). Pipeline
+mode also rejects any ``env`` context value outright: the pipeline owns its
+own ``dev`` and ``prod`` environments end to end, so an ``-c env`` override
+would silently do nothing.
 
 Usage:
     cdk deploy --all                            # prod stage in us-east-1 (default)
@@ -160,7 +167,14 @@ if pipeline_mode:
     PipelineStack(
         app,
         "ServerlessAppPipeline",
-        code_connection_arn=validate_code_connection_arn(app.node.try_get_context("code_connection_arn")),
+        # Context key wins (the workstation birth deploy — make deploy-pipeline
+        # resolves the ARN from CONN=/.env/auto-discovery and passes it as -c);
+        # the CODE_CONNECTION_ARN env var is how the pipeline's own synth step
+        # resolves it (baked into its CodeBuild definition — pipeline_stack.py).
+        # Neither home is the repo: the ARN is deliberately never committed.
+        code_connection_arn=validate_code_connection_arn(
+            app.node.try_get_context("code_connection_arn") or os.environ.get("CODE_CONNECTION_ARN")
+        ),
         retain_data=retain_data,
         appconfig_monitor=appconfig_monitor,
         ssm_param_path=ssm_param_path,

@@ -320,14 +320,41 @@ bootstrap-boundary: ## Deploy/update the cdk-scaffold-boundary IAM policy (run B
 		--capabilities CAPABILITY_NAMED_IAM \
 		--region $(REGION)
 
-deploy-pipeline: ## One-time deploy of the CD pipeline (self-mutates afterwards). CONN=<connection-arn> unless set in cdk.json
+deploy-pipeline: ## One-time deploy of the CD pipeline (self-mutates afterwards). ARN via CONN=<arn>, .env, or auto-discovery
 	# Prerequisites (in order): `make bootstrap-boundary`, then
 	# `npx cdk bootstrap --custom-permissions-boundary cdk-scaffold-boundary`,
 	# then the CodeConnections console handshake (README "CI/CD pipeline").
 	# After this one deploy the pipeline updates ITSELF from GitHub main —
-	# rerunning this target is only needed if the pipeline stack was deleted.
+	# rerunning this target is only needed if the pipeline stack was deleted
+	# or the connection rotated.
+	#
+	# The connection ARN is deliberately NOT committed (it embeds the account
+	# id; the repo is public). Resolution order:
+	#   1. CONN=<arn> on the command line;
+	#   2. CODE_CONNECTION_ARN in a gitignored ./.env (the project-scoped home);
+	#   3. auto-discovery — exactly one AVAILABLE GitHub connection in the
+	#      account (fail-loud on zero or several, listing what was found).
+	# The pipeline itself never needs any of these afterwards: the ARN is
+	# baked into its own synth step's env (see pipeline_stack.py).
+	@set -e; \
+	conn="$(CONN)"; \
+	if [ -z "$$conn" ] && [ -f .env ]; then \
+		conn=$$(sh -c '. ./.env >/dev/null 2>&1; printf "%s" "$$CODE_CONNECTION_ARN"'); \
+		[ -n "$$conn" ] && echo "Using CODE_CONNECTION_ARN from ./.env"; \
+	fi; \
+	if [ -z "$$conn" ]; then \
+		conn=$$( (aws codeconnections list-connections 2>/dev/null || aws codestar-connections list-connections 2>/dev/null) \
+			| python3 -c 'import json,sys; d=json.load(sys.stdin); print("\n".join(c["ConnectionArn"] for c in d.get("Connections",[]) if c.get("ConnectionStatus")=="AVAILABLE" and c.get("ProviderType")=="GitHub"))' ); \
+		count=$$(printf '%s' "$$conn" | grep -c . || true); \
+		if [ "$$count" -eq 0 ]; then \
+			echo "ERROR: no AVAILABLE GitHub CodeConnections connection found. Complete the console handshake (README 'CI/CD pipeline'), or pass CONN=<arn>, or set CODE_CONNECTION_ARN in ./.env."; exit 1; \
+		elif [ "$$count" -gt 1 ]; then \
+			echo "ERROR: multiple AVAILABLE GitHub connections found — pick one via CONN=<arn> or ./.env:"; printf '%s\n' "$$conn"; exit 1; \
+		fi; \
+		echo "Auto-discovered connection: $$conn"; \
+	fi; \
 	$(CDK) deploy ServerlessAppPipeline -c pipeline=true \
-		$(if $(CONN),-c code_connection_arn=$(CONN)) --require-approval never
+		-c code_connection_arn="$$conn" --require-approval never
 
 # --force skips the interactive "are you sure?" prompt, mirroring how
 # the deploy target uses --require-approval never. Without --force, the

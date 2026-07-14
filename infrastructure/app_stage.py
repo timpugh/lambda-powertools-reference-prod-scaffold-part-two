@@ -65,6 +65,12 @@ DEFAULT_ENV_NAME = "prod"
 # references a missing policy fails at deploy with an IAM error.
 BOUNDARY_POLICY_NAME = "cdk-scaffold-boundary"
 
+# The one PermissionsBoundary descriptor both deployable roots pass to their
+# super().__init__ (AppStage here; PipelineStack in pipeline_stack.py). A
+# shared module-level object rather than two from_name() calls so the wiring
+# can't drift between the direct-Stage and pipeline shapes.
+SCAFFOLD_PERMISSIONS_BOUNDARY = cdk.PermissionsBoundary.from_name(BOUNDARY_POLICY_NAME)
+
 # CloudFormation stack names allow only alphanumerics and hyphens, max 128
 # chars; env names are embedded in stack names so they inherit the constraint.
 _ENV_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}$")
@@ -157,10 +163,12 @@ def validate_code_connection_arn(raw: str | None) -> str:
     """
     if raw is None:
         raise ValueError(
-            "Missing CDK context key 'code_connection_arn' (required with -c pipeline=true). "
-            "Complete the one-time CodeConnections handshake in the console (Developer Tools "
-            "> Connections > Create connection > GitHub), then set the connection ARN in "
-            "cdk.json or pass -c code_connection_arn=arn:aws:codeconnections:..."
+            "No CodeConnections connection ARN (required with -c pipeline=true; resolved from "
+            "the 'code_connection_arn' context key or the CODE_CONNECTION_ARN env var — the ARN "
+            "is deliberately never committed). Complete the one-time CodeConnections handshake "
+            "in the console (Developer Tools > Connections > Create connection > GitHub), then "
+            "deploy via `make deploy-pipeline` (auto-discovers the connection; or CONN=<arn>, "
+            "or CODE_CONNECTION_ARN in a gitignored ./.env)."
         )
     if not _CODE_CONNECTION_ARN_RE.match(raw):
         raise ValueError(
@@ -246,12 +254,7 @@ class AppStage(cdk.Stage):
         ssm_param_path: str | None = None,
         **kwargs: Any,
     ) -> None:
-        super().__init__(
-            scope,
-            construct_id,
-            permissions_boundary=cdk.PermissionsBoundary.from_name(BOUNDARY_POLICY_NAME),
-            **kwargs,
-        )
+        super().__init__(scope, construct_id, permissions_boundary=SCAFFOLD_PERMISSIONS_BOUNDARY, **kwargs)
 
         validate_env_name(env_name)
         validate_ssm_param_path(ssm_param_path)

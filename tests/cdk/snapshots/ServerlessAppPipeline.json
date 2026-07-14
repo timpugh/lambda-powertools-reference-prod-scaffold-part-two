@@ -1639,6 +1639,13 @@
         },
         "Environment": {
           "ComputeType": "BUILD_GENERAL1_SMALL",
+          "EnvironmentVariables": [
+            {
+              "Name": "CODE_CONNECTION_ARN",
+              "Type": "PLAINTEXT",
+              "Value": "arn:aws:codeconnections:us-east-1:111111111111:connection/12345678-abcd-4ef0-9876-0123456789ab"
+            }
+          ],
           "Image": "aws/codebuild/standard:7.0",
           "ImagePullCredentialsType": "CODEBUILD",
           "PrivilegedMode": true,

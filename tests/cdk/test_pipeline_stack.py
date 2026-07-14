@@ -78,6 +78,35 @@ class TestPipelineCore:
             Match.object_like({"Environment": Match.object_like({"PrivilegedMode": True})}),
         )
 
+    def test_synth_carries_the_connection_arn_env_var(self, pipeline_template: Template) -> None:
+        # The ARN is deliberately never committed (public repo, embeds the
+        # account id) — the pipeline's own definition is its home. app.py
+        # falls back to CODE_CONNECTION_ARN when the context key is absent,
+        # so this env var is what makes every self-mutation synth
+        # self-sufficient. If it disappears, the pipeline's first run after
+        # the change fails at Synth with the validator's fail-loud error.
+        pipeline_template.has_resource_properties(
+            "AWS::CodeBuild::Project",
+            Match.object_like(
+                {
+                    "Environment": Match.object_like(
+                        {
+                            "EnvironmentVariables": Match.array_with(
+                                [
+                                    Match.object_like(
+                                        {
+                                            "Name": "CODE_CONNECTION_ARN",
+                                            "Value": CONNECTION_ARN,
+                                        }
+                                    )
+                                ]
+                            )
+                        }
+                    )
+                }
+            ),
+        )
+
     def test_codebuild_log_group_is_explicit_with_retention(self, pipeline_template: Template) -> None:
         pipeline_template.has_resource_properties("AWS::Logs::LogGroup", Match.object_like({"RetentionInDays": 90}))
 

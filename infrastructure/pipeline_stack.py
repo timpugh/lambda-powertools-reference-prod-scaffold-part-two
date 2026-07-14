@@ -30,7 +30,7 @@ from aws_cdk import aws_s3 as s3
 from aws_cdk import pipelines
 from constructs import Construct
 
-from infrastructure.app_stage import BOUNDARY_POLICY_NAME, AppStage
+from infrastructure.app_stage import SCAFFOLD_PERMISSIONS_BOUNDARY, AppStage
 from infrastructure.nag_utils import (
     LOG_SINK_SUPPRESSION_RULES,
     acknowledge_rules,
@@ -80,12 +80,7 @@ class PipelineStack(cdk.Stack):
         ssm_param_path: str | None = None,
         **kwargs: Any,
     ) -> None:
-        super().__init__(
-            scope,
-            construct_id,
-            permissions_boundary=cdk.PermissionsBoundary.from_name(BOUNDARY_POLICY_NAME),
-            **kwargs,
-        )
+        super().__init__(scope, construct_id, permissions_boundary=SCAFFOLD_PERMISSIONS_BOUNDARY, **kwargs)
         apply_compliance_aspects(self)
 
         # Per-stack CMK, same pattern as every other stack in the app.
@@ -157,6 +152,16 @@ class PipelineStack(cdk.Stack):
                 "npx cdk synth -c pipeline=true '**'",
                 "uv run python scripts/check_validation_report.py cdk.out",
             ],
+            # The connection ARN is deliberately NOT committed (it embeds the
+            # account id; the repo is public). The pipeline stores it in its
+            # own definition instead: this env var is how the self-mutation
+            # synth above resolves it — app.py falls back to
+            # CODE_CONNECTION_ARN when the context key is absent. The loop is
+            # self-consistent: the workstation birth deploy injects the value
+            # once (make deploy-pipeline auto-discovers it from the account),
+            # and every pipeline synth re-embeds what its own environment
+            # carries. Rotation = rerun make deploy-pipeline.
+            env={"CODE_CONNECTION_ARN": code_connection_arn},
             primary_output_directory="cdk.out",
         )
 
